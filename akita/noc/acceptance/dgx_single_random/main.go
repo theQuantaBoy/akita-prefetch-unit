@@ -1,0 +1,147 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"math/rand"
+	"net"
+	"net/http"
+
+	// Enable profiling
+	_ "net/http/pprof"
+
+	"github.com/sarchlab/akita/v5/noc/acceptance"
+	"github.com/sarchlab/akita/v5/noc/networking/nvlink"
+
+	"github.com/sarchlab/akita/v5/messaging"
+	"github.com/sarchlab/akita/v5/simulation"
+	"github.com/sarchlab/akita/v5/timing"
+	"github.com/tebeka/atexit"
+)
+
+func startProfilingServer() {
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("Profiling server running on:",
+		listener.Addr().(*net.TCPAddr).Port)
+
+	panic(http.Serve(listener, nil))
+}
+
+func main() {
+	flag.Parse()
+
+	go startProfilingServer()
+
+	rand.Seed(1)
+
+	sim := acceptance.NewSimulation()
+	engine := sim.GetEngine()
+	t := acceptance.NewTest()
+
+	agents := createNetwork(sim, t)
+	for _, agent := range agents {
+		t.RegisterAgent(agent)
+	}
+
+	t.GenerateMsgs(20000)
+
+	err := engine.Run()
+	if err != nil {
+		panic(err)
+	}
+
+	t.MustHaveReceivedAllMsgs()
+	t.ReportBandwidthAchieved(engine.CurrentTime())
+
+	sim.Terminate()
+	atexit.Exit(0)
+}
+
+func createNetwork(
+	sim *simulation.Simulation,
+	test *acceptance.Test,
+) []*acceptance.Agent {
+	agents := createAgents(sim, test)
+
+	connector := nvlink.NewConnector().
+		WithRegistrar(sim).
+		WithPCIeVersion(3, 16)
+	connector.CreateNetwork("Network")
+
+	deviceIDs := createPCIeNetwork(connector, agents)
+	createNVLinkNetwork(connector, deviceIDs)
+
+	connector.EstablishRoute()
+
+	return agents
+}
+
+func createAgents(
+	sim *simulation.Simulation,
+	test *acceptance.Test,
+) []*acceptance.Agent {
+	freq := 1.0 * timing.GHz
+
+	var agents []*acceptance.Agent
+
+	for i := 0; i < 9; i++ {
+		name := fmt.Sprintf("Agent[%d]", i)
+		ports := []messaging.Port{
+			messaging.NewPort(nil, 1, 1, name+".Port0"),
+		}
+		agent := acceptance.NewAgent(sim, freq, name, ports, test)
+		agent.TickLater()
+		agents = append(agents, agent)
+	}
+
+	return agents
+}
+
+func createPCIeNetwork(
+	connector *nvlink.Connector,
+	agents []*acceptance.Agent,
+) []int {
+	rootComplexID := connector.AddRootComplex(agents[0].AgentPorts)
+	switch1ID := connector.AddPCIeSwitch()
+	switch2ID := connector.AddPCIeSwitch()
+
+	connector.ConnectSwitchesWithPCIeLink(rootComplexID, switch1ID)
+	connector.ConnectSwitchesWithPCIeLink(rootComplexID, switch2ID)
+
+	deviceIDs := []int{0}
+
+	for i := 1; i < 5; i++ {
+		deviceID := connector.PlugInDevice(switch1ID, agents[i].AgentPorts)
+		deviceIDs = append(deviceIDs, deviceID)
+	}
+
+	for i := 5; i < 9; i++ {
+		deviceID := connector.PlugInDevice(switch2ID, agents[i].AgentPorts)
+		deviceIDs = append(deviceIDs, deviceID)
+	}
+
+	return deviceIDs
+}
+
+func createNVLinkNetwork(connector *nvlink.Connector, deviceIDs []int) {
+	connector.ConnectDevicesWithNVLink(deviceIDs[1], deviceIDs[2], 2)
+	connector.ConnectDevicesWithNVLink(deviceIDs[2], deviceIDs[3], 1)
+	connector.ConnectDevicesWithNVLink(deviceIDs[3], deviceIDs[4], 2)
+	connector.ConnectDevicesWithNVLink(deviceIDs[1], deviceIDs[4], 2)
+	connector.ConnectDevicesWithNVLink(deviceIDs[1], deviceIDs[3], 1)
+	connector.ConnectDevicesWithNVLink(deviceIDs[2], deviceIDs[4], 1)
+	connector.ConnectDevicesWithNVLink(deviceIDs[5], deviceIDs[6], 2)
+	connector.ConnectDevicesWithNVLink(deviceIDs[6], deviceIDs[7], 2)
+	connector.ConnectDevicesWithNVLink(deviceIDs[7], deviceIDs[8], 2)
+	connector.ConnectDevicesWithNVLink(deviceIDs[6], deviceIDs[8], 1)
+	connector.ConnectDevicesWithNVLink(deviceIDs[5], deviceIDs[7], 1)
+	connector.ConnectDevicesWithNVLink(deviceIDs[6], deviceIDs[8], 1)
+	connector.ConnectDevicesWithNVLink(deviceIDs[1], deviceIDs[6], 1)
+	connector.ConnectDevicesWithNVLink(deviceIDs[2], deviceIDs[5], 2)
+	connector.ConnectDevicesWithNVLink(deviceIDs[4], deviceIDs[8], 1)
+	connector.ConnectDevicesWithNVLink(deviceIDs[3], deviceIDs[7], 2)
+}

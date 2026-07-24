@@ -1,0 +1,284 @@
+package gmmu
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/sarchlab/akita/v5/mem/memcontrolprotocol"
+	"github.com/sarchlab/akita/v5/mem/vm"
+	"github.com/sarchlab/akita/v5/mem/vm/vmprotocol"
+	"github.com/sarchlab/akita/v5/modeling"
+
+	"github.com/sarchlab/akita/v5/timing"
+	"github.com/sarchlab/akita/v5/tracing"
+
+	// walkMW handles the top→page-table walk path:
+	// parseFromTop, startWalking, walkPageTable, removeCompletedTranslations,
+	// processRemoteMemReq, finalizePageWalk, doPageWalkHit.
+	"github.com/sarchlab/akita/v5/messaging"
+)
+
+type walkMW struct {
+	comp      *modeling.Component[Spec, State, Resources]
+	pageTable vm.PageTable
+}
+
+func (m *walkMW) topPort() messaging.Port {
+	return m.comp.GetPortByName("Top")
+}
+
+func (m *walkMW) bottomPort() messaging.Port {
+	return m.comp.GetPortByName("Bottom")
+}
+
+// Tick runs the walk stages. Paused GMMUs make no progress; draining
+// GMMUs continue page-table walks but accept no new requests.
+func (m *walkMW) Tick() bool {
+	if m.comp.State.ControlState == memcontrolprotocol.StatePaused {
+		return false
+	}
+
+	madeProgress := false
+
+	madeProgress = m.walkPageTable() || madeProgress
+	if m.comp.State.ControlState == memcontrolprotocol.StateEnabled {
+		madeProgress = m.parseFromTop() || madeProgress
+	}
+
+	return madeProgress
+}
+
+func (m *walkMW) parseFromTop() bool {
+	spec := m.comp.Spec()
+	state := &m.comp.State
+
+	reqI := m.topPort().PeekIncoming()
+	if reqI == nil {
+		return false
+	}
+
+	if len(state.WalkingTranslations) >= spec.MaxRequestsInFlight {
+		return false
+	}
+
+	// A walk slot is free: the at-head wait for one — counted on the
+	// incoming-buffer task since the request reached the head of the Top
+	// buffer — is over. The req_in opened at retrieve covers only the walk
+	// processing that follows.
+	tracing.AddMilestone(m.comp, tracing.Milestone{
+		TaskID: tracing.MsgIDAtIncomingBuffer(reqI, m.comp),
+		Kind:   tracing.MilestoneKindHardwareResource,
+		What:   m.comp.Name() + ".walk",
+	})
+
+	m.topPort().RetrieveIncoming()
+
+	switch req := reqI.(type) {
+	case vmprotocol.TranslationReq:
+		tracing.TraceReqReceive(m.comp, req)
+		m.startWalking(req)
+	default:
+		log.Panicf("gmmu cannot handle request of type %s",
+			fmt.Sprintf("%T", reqI))
+	}
+
+	return true
+}
+
+func (m *walkMW) startWalking(req vmprotocol.TranslationReq) {
+	spec := m.comp.Spec()
+	state := &m.comp.State
+
+	recvTaskID := tracing.MsgIDAtReceiver(req, m.comp)
+	walkTaskID := timing.GetIDGenerator().Generate()
+
+	ts := transactionState{
+		ReqID:      req.ID,
+		RecvTaskID: recvTaskID,
+		ReqSrc:     req.Src,
+		ReqDst:     req.Dst,
+		PID:        uint64(req.PID),
+		VAddr:      req.VAddr,
+		DeviceID:   req.DeviceID,
+		CycleLeft:  spec.Latency,
+		WalkTaskID: walkTaskID,
+	}
+
+	// Open the walk subtask spanning the page-table-walk latency, a child of the
+	// req_in, so the ".walk" work milestone has a corresponding bar. It is closed
+	// on the local-hit (doPageWalkHit) and remote-fetch (processRemoteMemReq)
+	// exits.
+	tracing.StartTask(m.comp, tracing.TaskStart{
+		ID:       walkTaskID,
+		ParentID: recvTaskID,
+		Kind:     tracing.PipelineTaskKind,
+		What:     m.comp.Name() + ".walk",
+	})
+
+	state.WalkingTranslations = append(
+		state.WalkingTranslations, ts)
+}
+
+func (m *walkMW) walkPageTable() bool {
+	state := &m.comp.State
+
+	if len(state.WalkingTranslations) == 0 {
+		return false
+	}
+
+	madeProgress := false
+	spec := m.comp.Spec()
+
+	for i := 0; i < len(state.WalkingTranslations); i++ {
+		if state.WalkingTranslations[i].CycleLeft > 0 {
+			state.WalkingTranslations[i].CycleLeft--
+			madeProgress = true
+			continue
+		}
+
+		ts := state.WalkingTranslations[i]
+
+		page, found := m.pageTable.Find(vm.PID(ts.PID), ts.VAddr)
+		if !found {
+			log.Panicf(
+				"gmmu: page not found for PID %d VAddr 0x%x",
+				ts.PID, ts.VAddr,
+			)
+		}
+
+		if page.DeviceID == spec.DeviceID {
+			madeProgress = m.finalizePageWalk(state, i) || madeProgress
+		} else {
+			madeProgress = m.processRemoteMemReq(state, i) || madeProgress
+		}
+	}
+
+	m.removeCompletedTranslations(state)
+
+	return madeProgress
+}
+
+func (m *walkMW) removeCompletedTranslations(state *State) {
+	if len(state.ToRemoveFromPTW) == 0 {
+		return
+	}
+
+	toRemoveSet := make(map[int]bool, len(state.ToRemoveFromPTW))
+	for _, idx := range state.ToRemoveFromPTW {
+		toRemoveSet[idx] = true
+	}
+
+	tmp := state.WalkingTranslations[:0]
+	for i := 0; i < len(state.WalkingTranslations); i++ {
+		if !toRemoveSet[i] {
+			tmp = append(tmp, state.WalkingTranslations[i])
+		}
+	}
+	state.WalkingTranslations = tmp
+	state.ToRemoveFromPTW = nil
+}
+
+func (m *walkMW) processRemoteMemReq(
+	state *State,
+	walkingIndex int,
+) bool {
+	if !m.bottomPort().CanSend() {
+		return false
+	}
+
+	spec := m.comp.Spec()
+	walking := state.WalkingTranslations[walkingIndex]
+
+	req := vmprotocol.TranslationReq{}
+	req.ID = timing.GetIDGenerator().Generate()
+	req.Src = m.bottomPort().AsRemote()
+	req.Dst = spec.LowModule
+	req.PID = vm.PID(walking.PID)
+	req.VAddr = walking.VAddr
+	req.DeviceID = walking.DeviceID
+	req.TrafficClass = "vmprotocol.TranslationReq"
+
+	state.RemoteMemReqs[req.ID] = walking
+
+	m.bottomPort().Send(req)
+
+	// Open the downstream req_out as a child task of the original req_in so the
+	// remote walk shows up as a proper subtask; it is finalized in
+	// handleTranslationRsp when the remote response returns.
+	tracing.TraceReqInitiate(m.comp, req, walking.RecvTaskID)
+
+	// The local walk countdown finished and the page is remote: attribute the
+	// countdown as work on the req_in and close the walk subtask that spanned
+	// it. The downstream req_out (opened above) then covers the remote fetch.
+	tracing.AddMilestone(m.comp, tracing.Milestone{
+		TaskID: walking.RecvTaskID,
+		Kind:   tracing.MilestoneKindWork,
+		What:   m.comp.Name() + ".walk",
+	})
+	tracing.EndTask(m.comp, tracing.TaskEnd{ID: walking.WalkTaskID})
+
+	state.ToRemoveFromPTW = append(state.ToRemoveFromPTW, walkingIndex)
+
+	return true
+}
+
+func (m *walkMW) finalizePageWalk(
+	state *State,
+	walkingIndex int,
+) bool {
+	ts := state.WalkingTranslations[walkingIndex]
+	page, found := m.pageTable.Find(vm.PID(ts.PID), ts.VAddr)
+	if !found {
+		return false
+	}
+
+	state.WalkingTranslations[walkingIndex].Page = pageStateFromPage(page)
+
+	return m.doPageWalkHit(state, walkingIndex)
+}
+
+func (m *walkMW) doPageWalkHit(
+	state *State,
+	walkingIndex int,
+) bool {
+	if !m.topPort().CanSend() {
+		return false
+	}
+	walking := state.WalkingTranslations[walkingIndex]
+
+	rsp := vmprotocol.TranslationRsp{
+		Page: pageFromPageState(walking.Page),
+	}
+	rsp.ID = timing.GetIDGenerator().Generate()
+	rsp.Src = m.topPort().AsRemote()
+	rsp.Dst = walking.ReqSrc
+	rsp.RspTo = walking.ReqID
+	rsp.TrafficClass = "vmprotocol.TranslationRsp"
+
+	m.topPort().Send(rsp)
+
+	state.ToRemoveFromPTW = append(state.ToRemoveFromPTW, walkingIndex)
+
+	// The local page walk counted down CycleLeft before reaching here; record
+	// that processing latency as work on the original req_in and close the walk
+	// subtask that spanned it, so the work milestone has a corresponding bar.
+	tracing.AddMilestone(m.comp, tracing.Milestone{
+		TaskID: walking.RecvTaskID,
+		Kind:   tracing.MilestoneKindWork,
+		What:   m.comp.Name() + ".walk",
+	})
+	tracing.EndTask(m.comp, tracing.TaskEnd{ID: walking.WalkTaskID})
+
+	tracing.TraceReqComplete(
+		m.comp,
+		vmprotocol.TranslationReq{
+			MsgMeta: messaging.MsgMeta{
+				ID:  walking.ReqID,
+				Src: walking.ReqSrc,
+				Dst: walking.ReqDst,
+			},
+		},
+	)
+
+	return true
+}
