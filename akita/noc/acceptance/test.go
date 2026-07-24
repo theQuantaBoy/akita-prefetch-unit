@@ -1,0 +1,122 @@
+package acceptance
+
+import (
+	"github.com/sarchlab/akita/v5/messaging"
+	"github.com/sarchlab/akita/v5/timing"
+	"log"
+	"math/rand"
+)
+
+// TrafficMsg is a concrete message type used in acceptance tests.
+type TrafficMsg struct {
+	messaging.MsgMeta
+}
+
+// Protocol is the acceptance traffic protocol: test agents exchange traffic
+// messages symmetrically, so the protocol has a single role. Defining the
+// protocol registers the message type with the checkpoint codec.
+var (
+	Protocol = messaging.DefineProtocol("noc.acceptance",
+		messaging.RoleDef{Name: "agent",
+			Sends: []messaging.Msg{TrafficMsg{}}},
+	)
+	AgentRole = Protocol.Role("agent")
+)
+
+// Test is a test case.
+type Test struct {
+	agents            []*Agent
+	msgs              []TrafficMsg
+	receivedMsgs      []TrafficMsg
+	receivedMsgsTable map[uint64]bool
+}
+
+// NewTest creates a new test.
+func NewTest() *Test {
+	t := &Test{}
+	t.receivedMsgsTable = make(map[uint64]bool)
+
+	return t
+}
+
+// RegisterAgent adds an agent to the Test
+func (t *Test) RegisterAgent(agent *Agent) {
+	t.agents = append(t.agents, agent)
+}
+
+// GenerateMsgs generates n message from a random source port to a random
+// destination port.
+func (t *Test) GenerateMsgs(n uint64) {
+	for i := uint64(0); i < n; i++ {
+		srcAgentID := rand.Intn(len(t.agents))
+		srcAgent := t.agents[srcAgentID]
+		srcPortID := rand.Intn(len(srcAgent.AgentPorts))
+		srcPort := srcAgent.AgentPorts[srcPortID]
+
+		dstAgentID := rand.Intn(len(t.agents))
+		for dstAgentID == srcAgentID {
+			dstAgentID = rand.Intn(len(t.agents))
+		}
+
+		dstAgent := t.agents[dstAgentID]
+		dstPortID := rand.Intn(len(dstAgent.AgentPorts))
+		dstPort := dstAgent.AgentPorts[dstPortID]
+
+		msg := TrafficMsg{
+			MsgMeta: messaging.MsgMeta{
+				ID:           timing.GetIDGenerator().Generate(),
+				Src:          srcPort.AsRemote(),
+				Dst:          dstPort.AsRemote(),
+				TrafficBytes: rand.Intn(4096),
+			},
+		}
+		srcAgent.MsgsToSend = append(srcAgent.MsgsToSend, msg)
+		t.registerMsg(msg)
+	}
+}
+
+func (t *Test) registerMsg(msg TrafficMsg) {
+	t.msgs = append(t.msgs, msg)
+}
+
+// receiveMsgMeta marks that a message (identified by its MsgMeta) is received.
+func (t *Test) receiveMsgMeta(meta messaging.MsgMeta, recvPort messaging.Port) {
+	if meta.Dst != recvPort.AsRemote() {
+		panic("msg delivered to a wrong destination")
+	}
+
+	if _, found := t.receivedMsgsTable[meta.ID]; found {
+		panic("msg is double delivered")
+	}
+	t.receivedMsgsTable[meta.ID] = true
+
+	// Wrap in TrafficMsg so existing bookkeeping works.
+	t.receivedMsgs = append(t.receivedMsgs, TrafficMsg{MsgMeta: meta})
+}
+
+// MustHaveReceivedAllMsgs asserts that all the messages sent are received.
+func (t *Test) MustHaveReceivedAllMsgs() {
+	if len(t.msgs) == len(t.receivedMsgs) {
+		return
+	}
+
+	for _, sentMsg := range t.msgs {
+		if _, found := t.receivedMsgsTable[sentMsg.ID]; !found {
+			log.Printf("msg %d expected, but not received\n", sentMsg.ID)
+		}
+	}
+
+	panic("some messages are dropped")
+}
+
+// ReportBandwidthAchieved dumps the bandwidth observed by each agents.
+func (t *Test) ReportBandwidthAchieved(now timing.VTimeInPicoSec) {
+	for _, a := range t.agents {
+		nowSec := float64(now) / 1e12
+		log.Printf(
+			"agent %s, send bandwidth %.2f GB/s, recv bandwidth %.2f GB/s",
+			a.Name(),
+			float64(a.sendBytes)/nowSec/1e9,
+			float64(a.recvBytes)/nowSec/1e9)
+	}
+}

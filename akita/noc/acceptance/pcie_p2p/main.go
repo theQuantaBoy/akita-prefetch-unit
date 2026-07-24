@@ -1,0 +1,78 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"math/rand"
+
+	"github.com/sarchlab/akita/v5/noc/acceptance"
+	"github.com/sarchlab/akita/v5/noc/networking/pcie"
+
+	"github.com/sarchlab/akita/v5/messaging"
+	"github.com/sarchlab/akita/v5/simulation"
+	"github.com/sarchlab/akita/v5/timing"
+	"github.com/tebeka/atexit"
+)
+
+func main() {
+	flag.Parse()
+	rand.Seed(1)
+
+	sim := acceptance.NewSimulation()
+	engine := sim.GetEngine()
+	t := acceptance.NewTest()
+
+	createNetwork(sim, t)
+	t.GenerateMsgs(1000)
+
+	err := engine.Run()
+	if err != nil {
+		panic(err)
+	}
+
+	t.MustHaveReceivedAllMsgs()
+	t.ReportBandwidthAchieved(engine.CurrentTime())
+	sim.Terminate()
+	atexit.Exit(0)
+}
+
+func createNetwork(sim *simulation.Simulation, test *acceptance.Test) {
+	freq := 1.0 * timing.GHz
+
+	var agents []*acceptance.Agent
+
+	for i := 0; i < 9; i++ {
+		name := fmt.Sprintf("Agent[%d]", i)
+		ports := make([]messaging.Port, 5)
+		for j := 0; j < 5; j++ {
+			ports[j] = messaging.NewPort(nil, 1, 1, fmt.Sprintf("%s.Port%d", name, j))
+		}
+		agent := acceptance.NewAgent(sim, freq, name, ports, test)
+		agent.TickLater()
+		agents = append(agents, agent)
+	}
+
+	pcieConnector := pcie.NewConnector()
+	pcieConnector = pcieConnector.
+		WithRegistrar(sim).
+		WithFrequency(1*timing.GHz).
+		WithVersion(4, 16)
+
+	pcieConnector.CreateNetwork("PCIe")
+	rootComplexID := pcieConnector.AddRootComplex(agents[0].AgentPorts)
+
+	switch1ID := pcieConnector.AddSwitch(rootComplexID)
+	for i := 1; i < 5; i++ {
+		pcieConnector.PlugInDevice(switch1ID, agents[i].AgentPorts)
+	}
+
+	switch2ID := pcieConnector.AddSwitch(rootComplexID)
+	for i := 5; i < 9; i++ {
+		pcieConnector.PlugInDevice(switch2ID, agents[i].AgentPorts)
+	}
+
+	pcieConnector.EstablishRoute()
+
+	test.RegisterAgent(agents[1])
+	test.RegisterAgent(agents[8])
+}
