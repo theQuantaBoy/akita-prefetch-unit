@@ -1,0 +1,98 @@
+package switches
+
+import (
+	"github.com/sarchlab/akita/v5/modeling"
+	"github.com/sarchlab/akita/v5/noc/packetization"
+
+	"github.com/sarchlab/akita/v5/messaging"
+	"github.com/sarchlab/akita/v5/timing"
+	"github.com/sarchlab/akita/v5/tracing"
+)
+
+type receivePipelineMW struct {
+	comp      *modeling.Component[Spec, State, modeling.None]
+	portIndex map[messaging.RemotePort]int
+}
+
+// ports returns the switch's local ports, in index order aligned with
+// State.PortComplexes.
+func (m *receivePipelineMW) ports() []messaging.Port {
+	return m.comp.PortsInGroup("Port")
+}
+
+// Tick runs movePipeline → startProcessing.
+func (m *receivePipelineMW) Tick() bool {
+	madeProgress := false
+
+	madeProgress = m.movePipeline() || madeProgress
+	madeProgress = m.startProcessing() || madeProgress
+
+	return madeProgress
+}
+
+func (m *receivePipelineMW) flitParentTaskID(flit packetization.Flit) uint64 {
+	return flit.MsgMeta.ID
+}
+
+func (m *receivePipelineMW) startProcessing() (madeProgress bool) {
+	state := &m.comp.State
+
+	for i, port := range m.ports() {
+		pcs := &state.PortComplexes[i]
+
+		for j := 0; j < pcs.NumInputChannel; j++ {
+			itemI := port.PeekIncoming()
+			if itemI == nil {
+				break
+			}
+
+			flit := itemI.(packetization.Flit)
+			taskID := timing.GetIDGenerator().Generate()
+			item := routedFlit{
+				Flit:    flit,
+				TaskID:  taskID,
+				RouteTo: flit.Msg.Dst,
+			}
+
+			if pcs.Latency == 0 {
+				if !pcs.RouteBuffer.CanPush() {
+					break
+				}
+				pcs.RouteBuffer.PushTyped(item)
+			} else {
+				if !pcs.Pipeline.CanAccept() {
+					break
+				}
+				pcs.Pipeline.Accept(item)
+			}
+
+			port.RetrieveIncoming()
+
+			madeProgress = true
+
+			tracing.StartTask(m.comp, tracing.TaskStart{
+				ID:       taskID,
+				ParentID: m.flitParentTaskID(flit),
+				Kind:     "flit",
+				What:     "flit_inside_sw",
+				Detail:   flit,
+			})
+		}
+	}
+
+	return madeProgress
+}
+
+func (m *receivePipelineMW) movePipeline() (madeProgress bool) {
+	state := &m.comp.State
+
+	for i := range m.ports() {
+		pcs := &state.PortComplexes[i]
+		if pcs.Latency == 0 {
+			continue
+		}
+		madeProgress = pcs.Pipeline.Tick(&pcs.RouteBuffer) || madeProgress
+	}
+
+	return madeProgress
+}

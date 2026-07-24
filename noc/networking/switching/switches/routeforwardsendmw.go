@@ -1,0 +1,200 @@
+package switches
+
+import (
+	"fmt"
+
+	"github.com/sarchlab/akita/v5/modeling"
+	"github.com/sarchlab/akita/v5/noc/networking/routing"
+
+	"github.com/sarchlab/akita/v5/messaging"
+	"github.com/sarchlab/akita/v5/tracing"
+)
+
+// routeForwardSendMiddleware returns the routeForwardSendMW from the
+// component's middleware list (registered at index 0).
+func routeForwardSendMiddleware(
+	c *modeling.Component[Spec, State, modeling.None],
+) *routeForwardSendMW {
+	return c.Middlewares()[0].(*routeForwardSendMW)
+}
+
+// GetRoutingTable returns the routing table used by the switch. It locates the
+// routeForwardSendMW by type rather than by middleware index, so it does not
+// depend on the order in which middlewares were registered.
+func GetRoutingTable(c *modeling.Component[Spec, State, modeling.None]) routing.Table {
+	for _, mw := range c.Middlewares() {
+		if rfsMW, ok := mw.(*routeForwardSendMW); ok {
+			return rfsMW.routingTable
+		}
+	}
+
+	panic(fmt.Sprintf("%s: no routeForwardSendMW middleware found", c.Name()))
+}
+
+type routeForwardSendMW struct {
+	comp         *modeling.Component[Spec, State, modeling.None]
+	portIndex    map[messaging.RemotePort]int // remotePort → index in State.PortComplexes
+	routingTable routing.Table
+}
+
+// ports returns the switch's local ports, in index order aligned with
+// State.PortComplexes.
+func (m *routeForwardSendMW) ports() []messaging.Port {
+	return m.comp.PortsInGroup("Port")
+}
+
+// Tick runs sendOut → forward → route.
+func (m *routeForwardSendMW) Tick() bool {
+	madeProgress := false
+
+	madeProgress = m.sendOut() || madeProgress
+	madeProgress = m.forward() || madeProgress
+	madeProgress = m.route() || madeProgress
+
+	return madeProgress
+}
+
+func (m *routeForwardSendMW) route() (madeProgress bool) {
+	state := &m.comp.State
+
+	for i := range m.ports() {
+		pcs := &state.PortComplexes[i]
+
+		for j := 0; j < pcs.NumInputChannel; j++ {
+			if pcs.RouteBuffer.Size() == 0 {
+				break
+			}
+
+			if !pcs.ForwardBuffer.CanPush() {
+				break
+			}
+
+			item := pcs.RouteBuffer.Pop()
+			outputBufIdx := m.resolveOutputBufIdx(item.RouteTo)
+			item.OutputBufIdx = outputBufIdx
+
+			pcs.ForwardBuffer.PushTyped(item)
+
+			// The flit waited in the route buffer until a forward-buffer slot
+			// opened (behind other flits / for downstream credit).
+			if m.comp.NumHooks() > 0 {
+				tracing.AddMilestone(m.comp, tracing.Milestone{
+					TaskID: item.TaskID,
+					Kind:   tracing.MilestoneKindQueue,
+					What:   m.comp.Name() + ".RouteBuffer",
+				})
+			}
+
+			madeProgress = true
+		}
+	}
+
+	return madeProgress
+}
+
+func (m *routeForwardSendMW) resolveOutputBufIdx(msgDst messaging.RemotePort) int {
+	outPort := m.routingTable.FindPort(msgDst)
+	if outPort == "" {
+		panic(fmt.Sprintf("%s: no output port for %s",
+			m.comp.Name(), msgDst))
+	}
+
+	idx, ok := m.portIndex[outPort]
+	if !ok {
+		panic(fmt.Sprintf("%s: no port index for %s",
+			m.comp.Name(), outPort))
+	}
+
+	return idx
+}
+
+func (m *routeForwardSendMW) forward() (madeProgress bool) {
+	state := &m.comp.State
+	occupiedOutputPort := make([]bool, len(m.ports()))
+
+	for offset := 0; offset < len(m.ports()); offset++ {
+		i := (state.NextArbPort + offset) % len(m.ports())
+		pcs := &state.PortComplexes[i]
+
+		for pcs.ForwardBuffer.Size() > 0 {
+			item := pcs.ForwardBuffer.Peek()
+			outIdx := item.OutputBufIdx
+
+			if occupiedOutputPort[outIdx] {
+				break
+			}
+
+			sendBuf := &state.PortComplexes[outIdx].SendOutBuffer
+			if !sendBuf.CanPush() {
+				break
+			}
+
+			pcs.ForwardBuffer.Pop()
+			// Push the whole routedFlit (carrying its TaskID) so the in-switch
+			// "flit" task can be ended in sendOut, once the flit actually
+			// leaves on the output link, rather than here.
+			sendBuf.PushTyped(item)
+
+			// The flit waited in the forward buffer for the output port to win
+			// arbitration and for a send-buffer slot downstream.
+			if m.comp.NumHooks() > 0 {
+				tracing.AddMilestone(m.comp, tracing.Milestone{
+					TaskID: item.TaskID,
+					Kind:   tracing.MilestoneKindNetworkBusy,
+					What:   m.comp.Name() + ".ForwardBuffer",
+				})
+			}
+
+			occupiedOutputPort[outIdx] = true
+			madeProgress = true
+		}
+	}
+
+	state.NextArbPort = (state.NextArbPort + 1) % len(m.ports())
+
+	return madeProgress
+}
+
+func (m *routeForwardSendMW) sendOut() (madeProgress bool) {
+	state := &m.comp.State
+
+	for i, port := range m.ports() {
+		pcs := &state.PortComplexes[i]
+
+		for j := 0; j < pcs.NumOutputChannel; j++ {
+			if pcs.SendOutBuffer.Size() == 0 {
+				break
+			}
+
+			if !port.CanSend() {
+				break
+			}
+
+			item := pcs.SendOutBuffer.Peek()
+			flit := item.Flit
+			flit.Src = port.AsRemote()
+			flit.Dst = pcs.RemotePort
+
+			port.Send(flit)
+			pcs.SendOutBuffer.Pop()
+
+			// The flit waited in the send-out buffer for the output link to be
+			// free; this is the last milestone before the task ends.
+			if m.comp.NumHooks() > 0 {
+				tracing.AddMilestone(m.comp, tracing.Milestone{
+					TaskID: item.TaskID,
+					Kind:   tracing.MilestoneKindNetworkBusy,
+					What:   port.Name(),
+				})
+			}
+
+			// The flit has now left the switch; close the in-switch "flit"
+			// task that opened when it entered the receive pipeline.
+			tracing.EndTask(m.comp, tracing.TaskEnd{ID: item.TaskID})
+
+			madeProgress = true
+		}
+	}
+
+	return madeProgress
+}

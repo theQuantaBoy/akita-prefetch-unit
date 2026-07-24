@@ -1,0 +1,276 @@
+package mmu
+
+import (
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"github.com/sarchlab/akita/v5/hooking"
+	"github.com/sarchlab/akita/v5/mem/vm"
+	"github.com/sarchlab/akita/v5/mem/vm/vmprotocol"
+	"github.com/sarchlab/akita/v5/messaging"
+	"github.com/sarchlab/akita/v5/modeling"
+	"github.com/sarchlab/akita/v5/timing"
+)
+
+// noopConn is a minimal messaging.Connection used to drive a component's real
+// ports in isolation. Because the MMU now owns its ports (they are no longer
+// injectable), tests feed requests with Deliver and read responses with
+// RetrieveOutgoing; the port still needs a connection so its send/retrieve
+// notifications have somewhere to go.
+type noopConn struct {
+	hooking.HookableBase
+}
+
+func (c *noopConn) Name() string                     { return "NoopConn" }
+func (c *noopConn) PlugIn(port messaging.Port)       { port.SetConnection(c) }
+func (c *noopConn) Unplug(_ messaging.Port)          {}
+func (c *noopConn) NotifyAvailable(_ messaging.Port) {}
+func (c *noopConn) NotifySend()                      {}
+
+// assignPort builds a port with the given buffer size using the same registrar
+// the component was built with, and assigns it to the component's declared port
+// of the same name.
+func assignPort(
+	reg modeling.Registrar,
+	comp *Comp,
+	name string,
+	bufSize int,
+) messaging.Port {
+	p := modeling.MakePortBuilder().
+		WithRegistrar(reg).
+		WithComponent(comp).
+		WithSpec(modeling.PortSpec{BufSize: bufSize}).
+		Build(name)
+	comp.AssignPort(name, p)
+	return p
+}
+
+var _ = Describe("MMU", func() {
+
+	var (
+		engine           timing.Engine
+		pageTable        vm.PageTable
+		mmuComp          *Comp
+		topPort          messaging.Port
+		translationMWRef *translationMW
+	)
+
+	// build constructs an MMU with the given Top buffer size, injects the
+	// shared page table, and plugs noopConns so its ports can be driven.
+	build := func(topBufSize int) {
+		reg := modeling.NewStandaloneRegistrar(engine)
+
+		mmuComp = MakeBuilder().
+			WithRegistrar(reg).
+			WithResources(Resources{PageTable: pageTable}).
+			WithSpec(DefaultSpec()).
+			Build("MMU")
+
+		topPort = assignPort(reg, mmuComp, "Top", topBufSize)
+		assignPort(reg, mmuComp, "Control", 4)
+
+		(&noopConn{}).PlugIn(topPort)
+		(&noopConn{}).PlugIn(mmuComp.GetPortByName("Control"))
+
+		translationMWRef = mmuComp.Middlewares()[1].(*translationMW)
+	}
+
+	BeforeEach(func() {
+		engine = timing.NewSerialEngine()
+		pageTable = vm.NewPageTable(12)
+		build(4096)
+	})
+
+	Context("parse top", func() {
+		It("should process translation request", func() {
+			translationReq := vmprotocol.TranslationReq{}
+			translationReq.ID = timing.GetIDGenerator().Generate()
+			translationReq.Src = messaging.RemotePort("Agent.Top")
+			translationReq.Dst = topPort.AsRemote()
+			translationReq.PID = 1
+			translationReq.VAddr = 0x100000100
+			translationReq.DeviceID = 0
+			translationReq.TrafficClass = "vmprotocol.TranslationReq"
+			topPort.Deliver(translationReq)
+
+			translationMWRef.parseFromTop()
+
+			next := &mmuComp.State
+			Expect(next.WalkingTranslations).To(HaveLen(1))
+		})
+
+		It("should stall parse from top "+
+			"if MMU is servicing max requests",
+			func() {
+				mmuComp.State = State{
+					WalkingTranslations: make([]transactionState, 16),
+				}
+
+				madeProgress := translationMWRef.parseFromTop()
+
+				Expect(madeProgress).To(BeFalse())
+			})
+	})
+
+	Context("walk page table", func() {
+		It("should reduce translation cycles", func() {
+			mmuComp.State = State{
+				WalkingTranslations: []transactionState{
+					{
+						ReqID:     timing.GetIDGenerator().Generate(),
+						ReqDst:    topPort.AsRemote(),
+						PID:       1,
+						VAddr:     0x1020,
+						DeviceID:  0,
+						CycleLeft: 10,
+					},
+				},
+			}
+
+			madeProgress := translationMWRef.walkPageTable()
+
+			next := &mmuComp.State
+			Expect(next.WalkingTranslations[0].CycleLeft).To(Equal(9))
+			Expect(madeProgress).To(BeTrue())
+		})
+
+		It("should send rsp to top if hit", func() {
+			page := vm.Page{
+				PID:      1,
+				VAddr:    0x1000,
+				PAddr:    0x0,
+				PageSize: 4096,
+				Valid:    true,
+			}
+			pageTable.Insert(page)
+
+			mmuComp.State = State{
+				WalkingTranslations: []transactionState{
+					{
+						ReqID:     timing.GetIDGenerator().Generate(),
+						ReqSrc:    messaging.RemotePort("Agent.Top"),
+						ReqDst:    topPort.AsRemote(),
+						PID:       1,
+						VAddr:     0x1000,
+						DeviceID:  0,
+						CycleLeft: 0,
+					},
+				},
+			}
+
+			madeProgress := translationMWRef.walkPageTable()
+
+			Expect(madeProgress).To(BeTrue())
+			next := &mmuComp.State
+			Expect(next.WalkingTranslations).To(HaveLen(0))
+
+			rsp := topPort.RetrieveOutgoing()
+			Expect(rsp).To(BeAssignableToTypeOf(vmprotocol.TranslationRsp{}))
+			Expect(rsp.(vmprotocol.TranslationRsp).Page).To(Equal(page))
+		})
+
+		It("should stall if cannot send to top", func() {
+			// Rebuild with a single-slot Top port and pre-fill its outgoing
+			// buffer so the controller's response Send fails.
+			build(1)
+
+			page := vm.Page{
+				PID:      1,
+				VAddr:    0x1000,
+				PAddr:    0x0,
+				PageSize: 4096,
+				Valid:    true,
+			}
+			pageTable.Insert(page)
+
+			dummy := vmprotocol.TranslationRsp{}
+			dummy.Src = topPort.AsRemote()
+			dummy.Dst = messaging.RemotePort("Agent.Top")
+			dummy.TrafficClass = "vmprotocol.TranslationRsp"
+			topPort.Send(dummy)
+
+			mmuComp.State = State{
+				WalkingTranslations: []transactionState{
+					{
+						ReqID:     timing.GetIDGenerator().Generate(),
+						ReqSrc:    messaging.RemotePort("Agent.Top"),
+						ReqDst:    topPort.AsRemote(),
+						PID:       1,
+						VAddr:     0x1000,
+						DeviceID:  0,
+						CycleLeft: 0,
+					},
+				},
+			}
+
+			madeProgress := translationMWRef.walkPageTable()
+
+			Expect(madeProgress).To(BeFalse())
+		})
+	})
+
+})
+
+var _ = Describe("MMU Integration", func() {
+	var (
+		engine    timing.Engine
+		mmuComp   *Comp
+		pageTable vm.PageTable
+		topPort   messaging.Port
+		agentPort messaging.Port
+	)
+
+	BeforeEach(func() {
+		engine = timing.NewSerialEngine()
+
+		pageTable = vm.NewPageTable(12)
+
+		reg := modeling.NewStandaloneRegistrar(engine)
+
+		mmuComp = MakeBuilder().
+			WithRegistrar(reg).
+			WithResources(Resources{PageTable: pageTable}).
+			WithSpec(DefaultSpec()).
+			Build("MMU")
+
+		topPort = assignPort(reg, mmuComp, "Top", 4096)
+		assignPort(reg, mmuComp, "Control", 4)
+		(&noopConn{}).PlugIn(topPort)
+
+		agentPort = messaging.NewPort(nil, 4, 4, "Agent.Top")
+		(&noopConn{}).PlugIn(agentPort)
+	})
+
+	It("should lookup", func() {
+		page := vm.Page{
+			PID:      1,
+			VAddr:    0x1000,
+			PAddr:    0x2000,
+			PageSize: 4096,
+			Valid:    true,
+			DeviceID: 1,
+		}
+		pageTable.Insert(page)
+
+		req := vmprotocol.TranslationReq{}
+		req.ID = timing.GetIDGenerator().Generate()
+		req.Src = agentPort.AsRemote()
+		req.Dst = topPort.AsRemote()
+		req.PID = 1
+		req.VAddr = 0x1000
+		req.DeviceID = 0
+		req.TrafficClass = "vmprotocol.TranslationReq"
+		topPort.Deliver(req)
+
+		// Drive enough ticks for the request to be parsed, walked, and
+		// answered (default latency is 10).
+		for i := 0; i < 20; i++ {
+			mmuComp.Tick()
+		}
+
+		rspI := topPort.RetrieveOutgoing()
+		Expect(rspI).ToNot(BeNil())
+		rsp := rspI.(vmprotocol.TranslationRsp)
+		Expect(rsp.Page).To(Equal(page))
+		Expect(rsp.RspTo).To(Equal(req.ID))
+	})
+})
