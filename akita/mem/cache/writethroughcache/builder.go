@@ -30,6 +30,12 @@ var defaultSpec = Spec{
 	DirLatency:            2,
 	InterleavingSize:      4096,
 	WritePolicyType:       "write-around",
+
+	PrefetchEnabled:             false,
+	PrefetchDegree:              4,
+	PrefetchConfidenceThreshold: 2,
+	PrefetchLog2PageSize:        12, // 4KiB pages
+	PrefetchMaxStreams:          16,
 }
 
 // DefaultSpec returns a copy of the default configuration. Callers typically
@@ -87,6 +93,10 @@ func (b Builder) Build(name string) *Comp {
 	spec := b.spec
 	if spec.WritePolicyType == "" {
 		spec.WritePolicyType = "write-around"
+	}
+
+	if spec.PrefetchEnabled && spec.PrefetchAlgorithm == "" {
+		spec.PrefetchAlgorithm = "stride"
 	}
 
 	b.resolveAddressMapper(&spec)
@@ -238,6 +248,7 @@ func (b *Builder) buildPipelineMW(
 	}
 
 	m.storage = comp.Resources().Storage
+	m.prefetcher = newPrefetcher(comp.Spec())
 
 	return m
 }

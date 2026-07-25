@@ -5,20 +5,16 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("Intake allocTransaction", func() {
-	var (
-		s    *intake
-		next *State
-	)
+var _ = Describe("allocTransaction", func() {
+	var next *State
 
 	BeforeEach(func() {
-		s = &intake{}
 		next = &State{}
 	})
 
 	It("should append when no Removed slot is available", func() {
-		idx0 := s.allocTransaction(next, transactionState{ID: 1})
-		idx1 := s.allocTransaction(next, transactionState{ID: 2})
+		idx0 := allocTransaction(next, transactionState{ID: 1})
+		idx1 := allocTransaction(next, transactionState{ID: 2})
 
 		Expect(idx0).To(Equal(0))
 		Expect(idx1).To(Equal(1))
@@ -26,14 +22,14 @@ var _ = Describe("Intake allocTransaction", func() {
 	})
 
 	It("should reuse a Removed slot instead of growing the slice", func() {
-		s.allocTransaction(next, transactionState{ID: 1})
-		idx1 := s.allocTransaction(next, transactionState{ID: 2})
-		s.allocTransaction(next, transactionState{ID: 3})
+		allocTransaction(next, transactionState{ID: 1})
+		idx1 := allocTransaction(next, transactionState{ID: 2})
+		allocTransaction(next, transactionState{ID: 3})
 
 		// Complete the middle transaction.
 		next.Transactions[idx1].Removed = true
 
-		reusedIdx := s.allocTransaction(next, transactionState{ID: 4})
+		reusedIdx := allocTransaction(next, transactionState{ID: 4})
 
 		Expect(reusedIdx).To(Equal(idx1))
 		Expect(next.Transactions).To(HaveLen(3))
@@ -46,7 +42,7 @@ var _ = Describe("Intake allocTransaction", func() {
 		// slice must never grow beyond the peak number of active transactions
 		// (one here), regardless of how many requests are processed.
 		for i := 0; i < 1000; i++ {
-			idx := s.allocTransaction(next, transactionState{ID: uint64(i)})
+			idx := allocTransaction(next, transactionState{ID: uint64(i)})
 			next.Transactions[idx].Removed = true
 		}
 

@@ -112,7 +112,7 @@ func (s *intake) createTransaction(msg messaging.Msg) int {
 		return -1
 	}
 
-	return s.allocTransaction(next, t)
+	return allocTransaction(next, t)
 }
 
 // allocTransaction stores t in the Transactions slice and returns its index.
@@ -121,7 +121,11 @@ func (s *intake) createTransaction(msg messaging.Msg) int {
 // indices must stay stable). Reuse a Removed slot when one is available so the
 // slice stays bounded by the number of active transactions instead of growing
 // with every request ever issued.
-func (s *intake) allocTransaction(next *State, t transactionState) int {
+//
+// It is a package-level function, not an *intake method, because directory's
+// prefetch issuance also allocates transactions (for self-issued,
+// requester-less speculative fetches) without going through intake at all.
+func allocTransaction(next *State, t transactionState) int {
 	for i := range next.Transactions {
 		if next.Transactions[i].Removed {
 			next.Transactions[i] = t
