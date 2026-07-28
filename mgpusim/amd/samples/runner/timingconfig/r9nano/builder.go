@@ -71,6 +71,13 @@ type Builder struct {
 	l1AddressMapper    *mem.InterleavedAddressPortMapper
 	l1TLBAddressMapper *mem.SinglePortMapper
 	dmaLocalDataSource *mem.InterleavedAddressPortMapper
+	// === Prefetch Fields ===
+    enablePrefetch           bool
+    prefetchAlgorithm        string
+    prefetchStrideDegree     int
+    prefetchStrideThreshold  uint32
+    prefetchStrideMaxStreams int
+    prefetchNextLineDegree   int
 }
 
 // MakeBuilder creates a new builder.
@@ -191,6 +198,24 @@ func (b Builder) WithDriverPort(
 	port messaging.RemotePort,
 ) gpubuilder.GPUBuilder {
 	b.driverPort = port
+	return b
+}
+
+// WithPrefetch configures the prefetching mechanism for L2 caches.
+func (b Builder) WithPrefetch(
+	algorithm string,
+	strideDegree int,
+	strideThreshold uint32,
+	strideMaxStreams int,
+	nextLineDegree int,
+) Builder {
+	b.enablePrefetch = true
+	b.prefetchAlgorithm = algorithm
+	b.prefetchStrideDegree = strideDegree
+	b.prefetchStrideThreshold = strideThreshold
+	b.prefetchStrideMaxStreams = strideMaxStreams
+	b.prefetchNextLineDegree = nextLineDegree
+
 	return b
 }
 
@@ -480,6 +505,19 @@ func (b *Builder) buildL2Caches() {
 	spec.TotalByteSize = byteSize
 	spec.NumMSHREntry = 64
 	spec.NumReqPerCycle = 16
+
+	// === Apply Prefetch Specs ===
+	if b.enablePrefetch {
+		fmt.Printf("PREFETCH ENABLED! Algorithm: %s | Degree: %d\n", b.prefetchAlgorithm, b.prefetchStrideDegree)
+		spec.EnablePrefetch = true
+		spec.PrefetchAlgorithm = b.prefetchAlgorithm
+		spec.PrefetchStrideDegree = b.prefetchStrideDegree
+		spec.PrefetchStrideThreshold = b.prefetchStrideThreshold
+		spec.PrefetchStrideMaxStreams = b.prefetchStrideMaxStreams
+		spec.PrefetchNextLineDegree = b.prefetchNextLineDegree
+	} else {
+		fmt.Println("PREFETCH IS DISABLED!")
+	}
 
 	for i := 0; i < b.numMemoryBank; i++ {
 		cacheName := fmt.Sprintf("%s.L2Cache[%d]", b.name, i)

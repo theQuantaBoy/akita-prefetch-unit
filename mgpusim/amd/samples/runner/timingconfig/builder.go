@@ -45,6 +45,14 @@ type Builder struct {
 
 	globalStorage     *mem.Storage
 	rdmaAddressMapper *mem.BankedAddressPortMapper
+
+	// === Prefetch Fields ===
+	enablePrefetch           bool
+	prefetchAlgorithm        string
+	prefetchStrideDegree     int
+	prefetchStrideThreshold  uint32
+	prefetchStrideMaxStreams int
+	prefetchNextLineDegree   int
 }
 
 // MakeBuilder creates a new Builder with default parameters.
@@ -85,6 +93,24 @@ func (b Builder) WithMagicMemoryCopy() Builder {
 // WithGPUType sets the GPU type for timing simulation (r9nano or mi300x).
 func (b Builder) WithGPUType(gpuType string) Builder {
 	b.gpuType = gpuType
+	return b
+}
+
+// WithPrefetch configures the prefetcher parameters in the timing builder.
+func (b Builder) WithPrefetch(
+	algorithm string,
+	strideDegree int,
+	strideThreshold uint32,
+	strideMaxStreams int,
+	nextLineDegree int,
+) Builder {
+	b.enablePrefetch = true
+	b.prefetchAlgorithm = algorithm
+	b.prefetchStrideDegree = strideDegree
+	b.prefetchStrideThreshold = strideThreshold
+	b.prefetchStrideMaxStreams = strideMaxStreams
+	b.prefetchNextLineDegree = nextLineDegree
+
 	return b
 }
 
@@ -215,17 +241,42 @@ func (b *Builder) createGPUBuilder(
 
 	switch b.gpuType {
 	case "mi300x":
-		return mi300x.MakeBuilder().
+		mBuilder := mi300x.MakeBuilder().
 			WithSimulation(b.simulation).
 			WithMMU(mmuComponent).
-			WithLog2PageSize(b.log2PageSize).
+			WithLog2PageSize(b.log2PageSize)
+
+		if b.enablePrefetch {
+			mBuilder = mBuilder.WithPrefetch(
+				b.prefetchAlgorithm,
+				b.prefetchStrideDegree,
+				b.prefetchStrideThreshold,
+				b.prefetchStrideMaxStreams,
+				b.prefetchNextLineDegree,
+			)
+		}
+
+		return mBuilder.
 			WithGlobalStorage(b.globalStorage).
 			WithDriverPort(driverPort)
+
 	default:
-		return r9nano.MakeBuilder().
+		rBuilder := r9nano.MakeBuilder().
 			WithSimulation(b.simulation).
 			WithMMU(mmuComponent).
-			WithLog2PageSize(b.log2PageSize).
+			WithLog2PageSize(b.log2PageSize)
+
+		if b.enablePrefetch {
+			rBuilder = rBuilder.WithPrefetch(
+				b.prefetchAlgorithm,
+				b.prefetchStrideDegree,
+				b.prefetchStrideThreshold,
+				b.prefetchStrideMaxStreams,
+				b.prefetchNextLineDegree,
+			)
+		}
+
+		return rBuilder.
 			WithGlobalStorage(b.globalStorage).
 			WithDriverPort(driverPort)
 	}

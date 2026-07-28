@@ -269,6 +269,18 @@ func (b Builder) WithDriverPort(
 	return b
 }
 
+// WithPrefetch is a placeholder method to satisfy the timingconfig builder.
+func (b Builder) WithPrefetch(
+	algorithm string,
+	strideDegree int,
+	strideThreshold uint32,
+	strideMaxStreams int,
+	nextLineDegree int,
+) Builder {
+	// No-op for mi300x since we are focusing on r9nano
+	return b
+}
+
 // Build builds the hardware platform.
 func (b Builder) Build(name string) *gpubuilder.GPU {
 	b.name = name

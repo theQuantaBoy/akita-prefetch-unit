@@ -8,6 +8,7 @@ import (
 	"github.com/sarchlab/akita/v5/modeling"
 	"github.com/sarchlab/akita/v5/queueing"
 	"github.com/sarchlab/akita/v5/timing"
+	"github.com/sarchlab/akita/v5/mem/cache/prefetch"
 )
 
 type cacheState int
@@ -41,6 +42,14 @@ type Spec struct {
 	AddressMapperType string   `json:"address_mapper_type"`
 	RemotePortNames   []string `json:"remote_port_names"`
 	InterleavingSize  uint64   `json:"interleaving_size"`
+
+
+	EnablePrefetch           bool   `json:"enable_prefetch"`
+	PrefetchAlgorithm        string `json:"prefetch_algorithm"`
+	PrefetchStrideDegree     int    `json:"prefetch_stride_degree"`
+	PrefetchStrideThreshold  uint32 `json:"prefetch_stride_threshold"`
+	PrefetchStrideMaxStreams int    `json:"prefetch_stride_max_streams"`
+	PrefetchNextLineDegree   int    `json:"prefetch_next_line_degree"`
 }
 
 // State contains mutable runtime data for the writeback cache.
@@ -83,6 +92,8 @@ type State struct {
 	FlusherBlockToEvictRefs []blockRef    `json:"flusher_block_to_evict_refs"`
 	HasProcessingFlush      bool          `json:"has_processing_flush"`
 	ProcessingFlush         flushReqState `json:"processing_flush"`
+
+	Prefetcher prefetch.Prefetcher `json:"-"`
 }
 
 // allocTransaction stores t in the Transactions slice and returns its index.
