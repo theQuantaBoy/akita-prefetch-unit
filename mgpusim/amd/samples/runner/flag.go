@@ -8,6 +8,19 @@ import (
 	"github.com/sarchlab/mgpusim/v5/amd/arch"
 )
 
+// === Prefetch Flags ===
+var enablePrefetchFlag = flag.Bool("enable-prefetch", false, "Enable L2 memory prefetching")
+var prefetchAlgorithmFlag = flag.String("prefetch-algorithm", "stride", "Prefetch algorithm: stride or nextline")
+
+// Stride prefetcher parameters
+var prefetchStrideDegreeFlag = flag.Int("prefetch-stride-degree", 3, "Lookahead degree for Stride prefetcher")
+var prefetchStrideThresholdFlag = flag.Uint("prefetch-stride-threshold", 2, "Confidence threshold for Stride prefetcher")
+var prefetchStrideMaxStreamsFlag = flag.Int("prefetch-stride-max-streams", 16, "Max tracked streams for Stride prefetcher")
+
+// NextLine prefetcher parameters
+var prefetchNextLineDegreeFlag = flag.Int("prefetch-nextline-degree", 1, "Lookahead degree for NextLine prefetcher")
+
+
 var timingFlag = flag.Bool("timing", false, "Run detailed timing simulation.")
 var maxInstCount = flag.Uint64("max-inst", 0,
 	"Terminate the simulation after the given number of instructions is retired.")
@@ -116,6 +129,20 @@ func (r *Runner) parseSimulationFlags() {
 
 	if *useUnifiedMemoryFlag {
 		r.UseUnifiedMemory = true
+	}
+
+	// === Parse Prefetch Flags ===
+	if *enablePrefetchFlag {
+		r.EnablePrefetch = true
+		r.PrefetchAlgorithm = strings.ToLower(*prefetchAlgorithmFlag)
+
+		// Stride parameters
+		r.PrefetchStrideDegree = *prefetchStrideDegreeFlag
+		r.PrefetchStrideThreshold = uint32(*prefetchStrideThresholdFlag)
+		r.PrefetchStrideMaxStreams = *prefetchStrideMaxStreamsFlag
+
+		// NextLine parameters
+		r.PrefetchNextLineDegree = *prefetchNextLineDegreeFlag
 	}
 
 	r.ArchType = parseArchFlag()

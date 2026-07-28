@@ -39,6 +39,14 @@ type Runner struct {
 
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
+
+	// === Prefetch Fields ===
+	EnablePrefetch           bool
+	PrefetchAlgorithm        string
+	PrefetchStrideDegree     int
+	PrefetchStrideThreshold  uint32
+	PrefetchStrideMaxStreams int
+	PrefetchNextLineDegree   int
 }
 
 // Init initializes the platform simulate
@@ -107,6 +115,17 @@ func (r *Runner) buildTimingPlatform() {
 		WithSimulation(r.simulation).
 		WithNumGPUs(r.GPUIDs[len(r.GPUIDs)-1]).
 		WithGPUType(r.GPUType)
+
+	//-------------------------------------------------
+	if r.EnablePrefetch {
+		b = b.WithPrefetch(
+			r.PrefetchAlgorithm,
+			r.PrefetchStrideDegree,
+			r.PrefetchStrideThreshold,
+			r.PrefetchStrideMaxStreams,
+			r.PrefetchNextLineDegree,
+		)
+	}
 
 	if *magicMemoryCopy {
 		b = b.WithMagicMemoryCopy()
