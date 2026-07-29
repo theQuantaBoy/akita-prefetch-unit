@@ -26,7 +26,8 @@ var defaultSpec = Spec{
 	WriteBufferCapacity: 1024,
 	MaxInflightFetch:    128,
 	MaxInflightEviction: 128,
-	InterleavingSize:    4096,
+	InterleavingSize:       4096,
+	PrefetchLog2PageSize:   12, // 4 KiB pages
 }
 
 // DefaultSpec returns a copy of the default configuration. Callers typically
@@ -248,6 +249,8 @@ func (b Builder) buildPipelineMW(
 	}
 
 	m.storage = comp.Resources().Storage
+	m.prefetcher = newPrefetcher(comp.Spec())
+	comp.State.Prefetcher = m.prefetcher
 
 	b.createInternalStages(m, laneWidth)
 

@@ -1,8 +1,6 @@
 package writethroughcache
 
 import (
-	"fmt"
-
 	"github.com/sarchlab/akita/v5/mem"
 	"github.com/sarchlab/akita/v5/mem/cache"
 	"github.com/sarchlab/akita/v5/mem/vm"
@@ -34,34 +32,6 @@ type Spec struct {
 	AddressMapperType string   `json:"address_mapper_type"`
 	RemotePortNames   []string `json:"remote_port_names"`
 	InterleavingSize  uint64   `json:"interleaving_size"`
-
-	// PrefetchEnabled turns on speculative prefetching from read misses.
-	// When false (the default), no prefetcher is built and every other
-	// Prefetch* field is ignored.
-	PrefetchEnabled bool `json:"prefetch_enabled"`
-
-	// PrefetchAlgorithm selects the prefetching strategy. Valid values:
-	// "stride" (default when PrefetchEnabled is true and this is left
-	// empty). Ignored when PrefetchEnabled is false.
-	PrefetchAlgorithm string `json:"prefetch_algorithm"`
-
-	// PrefetchDegree is the lookahead distance (number of strides to
-	// prefetch ahead) once a stream's pattern is trusted.
-	PrefetchDegree int `json:"prefetch_degree"`
-
-	// PrefetchConfidenceThreshold is the number of consecutive stride
-	// matches required before a stream is trusted enough to prefetch.
-	PrefetchConfidenceThreshold uint32 `json:"prefetch_confidence_threshold"`
-
-	// PrefetchLog2PageSize is log2 of the page size, in bytes, used to
-	// suppress prefetch candidates that would cross a page boundary. It is
-	// independent of Log2BlockSize, which the prefetcher also reuses to
-	// align observed addresses to the block granularity it predicts at.
-	PrefetchLog2PageSize uint64 `json:"prefetch_log2_page_size"`
-
-	// PrefetchMaxStreams caps how many concurrent access streams the
-	// prefetcher tracks before evicting the least-recently-touched one.
-	PrefetchMaxStreams int `json:"prefetch_max_streams"`
 }
 
 // State contains mutable runtime data for the writethroughcache.
@@ -163,15 +133,6 @@ type transactionState struct {
 	// Removed marks a transaction that has been completed
 	// and removed from active processing.
 	Removed bool `json:"removed"`
-
-	// IsPrefetch marks a transaction as a self-issued speculative fetch
-	// with no real requester on Top: it was never received at intake, so
-	// its ReadMeta is a synthetic, internal-only key rather than a message
-	// that can be responded to. It otherwise runs through the exact same
-	// directory/MSHR/bank-write path as a demand read miss; only
-	// respondStage treats it differently, retiring it silently instead of
-	// sending a DataReadyRsp.
-	IsPrefetch bool `json:"is_prefetch"`
 }
 
 func (t *transactionState) Address() uint64 {
@@ -204,8 +165,3 @@ type Resources struct {
 
 // Comp is the writethroughcache component type.
 type Comp = modeling.Component[Spec, State, Resources]
-
-// just for test, should be removed later
-func init() {
-	fmt.Println("✅ writethroughcache package loaded (local)")
-}

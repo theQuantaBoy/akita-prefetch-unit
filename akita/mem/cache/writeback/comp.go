@@ -50,6 +50,7 @@ type Spec struct {
 	PrefetchStrideThreshold  uint32 `json:"prefetch_stride_threshold"`
 	PrefetchStrideMaxStreams int    `json:"prefetch_stride_max_streams"`
 	PrefetchNextLineDegree   int    `json:"prefetch_next_line_degree"`
+	PrefetchLog2PageSize     uint64 `json:"prefetch_log2_page_size"`
 }
 
 // State contains mutable runtime data for the writeback cache.
@@ -277,6 +278,15 @@ type transactionState struct {
 	// Data saved from MSHR entry before removal (for bank/mshr stage)
 	MSHRData               []byte `json:"mshr_data"`
 	MSHRTransactionIndices []int  `json:"mshr_transaction_indices"`
+
+	// IsPrefetch marks this transaction as a self-issued speculative fetch
+	// with no real requester on Top: it was never received at the topParser,
+	// so its ReadMeta is a synthetic, internal-only key rather than a message
+	// that can be responded to. It otherwise runs through the exact same
+	// directory/MSHR/bank/write-buffer path as a demand read miss; only the
+	// response path treats it differently, retiring it silently instead of
+	// sending a DataReadyRsp.
+	IsPrefetch bool `json:"is_prefetch"`
 
 	// Removed marks this transaction slot as logically deleted.
 	Removed bool `json:"removed"`

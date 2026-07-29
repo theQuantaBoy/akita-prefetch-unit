@@ -73,7 +73,13 @@ func (s *mshrStage) processOneReq() bool {
 		next.Transactions[transIdx].Removed = true
 
 		if trans.HasRead {
-			s.respondRead(trans, processingTrans.MSHRData, spec.Log2BlockSize)
+			if trans.IsPrefetch {
+				// Prefetch: data has been written to the
+				// bank. Retire silently — no response on
+				// Top since there is no real requester.
+			} else {
+				s.respondRead(trans, processingTrans.MSHRData, spec.Log2BlockSize)
+			}
 		} else {
 			s.respondWrite(trans)
 		}

@@ -135,7 +135,12 @@ func (ds *directoryStage) doRead(transIdx int, trans *transactionState) bool {
 		return ds.handleReadHit(transIdx, trans, setID, wayID)
 	}
 
-	return ds.handleReadMiss(transIdx, trans)
+	ok := ds.handleReadMiss(transIdx, trans)
+	if ok && !trans.IsPrefetch {
+		ds.triggerPrefetch(trans)
+	}
+
+	return ok
 }
 
 func (ds *directoryStage) handleReadMSHRHit(
@@ -680,4 +685,86 @@ func (ds *directoryStage) popDirPostBuf() {
 	}
 
 	next.DirPostPipelineBuf.Pop()
+}
+
+// triggerPrefetch invokes the configured prefetcher with the address accessed
+// by the demand read miss, filters the returned candidates against the
+// directory and MSHR, and creates synthetic read-miss transactions (with
+// IsPrefetch set) that flow through the normal miss pipeline. The prefetched
+// data eventually lands in the cache but no response is sent to Top.
+func (ds *directoryStage) triggerPrefetch(demandTrans *transactionState) {
+	// Debug logging (uncomment for quick terminal inspection):
+	// fmt.Printf("[PREFETCH CALLED]  addr=0x%x pid=%d src=%s prefetcherNil=%v\n",
+	// 	demandTrans.ReadAddress, demandTrans.ReadPID,
+	// 	demandTrans.ReadMeta.Src, ds.cache.prefetcher == nil)
+
+	spec := ds.cache.comp.Spec()
+	next := &ds.cache.comp.State
+
+	if ds.cache.prefetcher == nil {
+		return
+	}
+
+	blockSize := uint64(1 << spec.Log2BlockSize)
+	streamID := streamIDFor(demandTrans.ReadPID, demandTrans.ReadMeta.Src)
+	candidates := ds.cache.prefetcher.Access(streamID, demandTrans.ReadAddress)
+
+	// Debug logging (uncomment for quick terminal inspection):
+	// if len(candidates) > 0 {
+	// 	fmt.Printf("[PREFETCH TRIGGER] Stream 0x%x | demand 0x%x -> %d candidate(s)\n",
+	// 		streamID, demandTrans.ReadAddress, len(candidates))
+	// }
+
+	for _, addr := range candidates {
+		cacheLineID, _ := getCacheLineID(addr, spec.Log2BlockSize)
+
+		// Skip if already in-flight (MSHR has this line).
+		if _, found := cache.MSHRQuery(
+			&next.MSHRState, demandTrans.ReadPID, cacheLineID); found {
+			continue
+		}
+
+		// Skip if the line is already valid in the directory.
+		_, _, found := cache.DirectoryLookup(
+			&next.DirectoryState,
+			spec.NumSets, int(blockSize),
+			demandTrans.ReadPID, cacheLineID)
+		if found {
+			continue
+		}
+
+		// Stop issuing if the MSHR is full (backpressure).
+		if cache.MSHRIsFull(&next.MSHRState, spec.NumMSHREntry) {
+			return
+		}
+
+		// Stop if the directory stage buffer is full.
+		if !next.DirStageBuf.CanPush() {
+			return
+		}
+
+		// Create a synthetic read transaction whose ReadMeta reuses
+		// the demand requester's Src so the prefetcher can train per-
+		// stream, but with a fresh, internal-only ID that is never
+		// responded to on Top.
+		trans := transactionState{
+			ID:                 timing.GetIDGenerator().Generate(),
+			HasRead:            true,
+			ReadAddress:        cacheLineID,
+			ReadAccessByteSize: blockSize,
+			ReadPID:            demandTrans.ReadPID,
+			ReadMeta: messaging.MsgMeta{
+				ID:  timing.GetIDGenerator().Generate(),
+				Src: demandTrans.ReadMeta.Src,
+			},
+			IsPrefetch: true,
+		}
+
+		idx := next.allocTransaction(trans)
+		next.DirStageBuf.PushTyped(idx)
+
+		// Debug logging (uncomment for quick terminal inspection):
+		// fmt.Printf("[PREFETCH ISSUED]  Stream 0x%x -> candidate 0x%x (trans[%d])\n",
+		// 	streamID, cacheLineID, idx)
+	}
 }

@@ -191,12 +191,24 @@ func (s *bankStage) finalizeTrans() bool {
 }
 
 func (s *bankStage) finalizeReadHit(transIdx int, trans *transactionState) bool {
+	spec := s.cache.comp.Spec()
+	next := &s.cache.comp.State
+
+	if trans.IsPrefetch {
+		// Prefetch hit: the line is already resident in cache.
+		// Retire silently — no response on Top since there is no
+		// real requester.
+		nextBlock := &next.DirectoryState.Sets[trans.BlockSetID].Blocks[trans.BlockWayID]
+		nextBlock.ReadCount--
+		trans.Removed = true
+		next.BankInflightTransCounts[s.bankID]--
+		s.finishBank(trans)
+		return true
+	}
+
 	if !s.cache.topPort().CanSend() {
 		return false
 	}
-
-	spec := s.cache.comp.Spec()
-	next := &s.cache.comp.State
 
 	addr := trans.ReadAddress
 	_, offset := getCacheLineID(addr, spec.Log2BlockSize)

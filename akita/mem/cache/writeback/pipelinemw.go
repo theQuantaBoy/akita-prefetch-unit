@@ -2,6 +2,7 @@ package writeback
 
 import (
 	"github.com/sarchlab/akita/v5/mem"
+	"github.com/sarchlab/akita/v5/mem/cache/prefetch"
 	"github.com/sarchlab/akita/v5/messaging"
 	"github.com/sarchlab/akita/v5/modeling"
 )
@@ -13,6 +14,12 @@ type pipelineMW struct {
 	comp *modeling.Component[Spec, State, Resources]
 
 	storage *mem.Storage
+
+	// prefetcher is nil when Spec.EnablePrefetch is false. It is
+	// algorithm-learned state (stream tables, confidence counters), not
+	// simulation state: it is not part of the serializable State struct
+	// and is rebuilt fresh by the Builder rather than checkpointed.
+	prefetcher prefetch.Prefetcher
 
 	topParser   *topParser
 	writeBuffer *writeBufferStage
