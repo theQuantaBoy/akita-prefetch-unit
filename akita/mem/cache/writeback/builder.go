@@ -2,7 +2,8 @@ package writeback
 
 import (
 	"fmt"
-
+	"os"
+	"strconv"
 	"github.com/sarchlab/akita/v5/mem"
 	"github.com/sarchlab/akita/v5/mem/cache"
 	"github.com/sarchlab/akita/v5/mem/memcontrolprotocol"
@@ -28,6 +29,12 @@ var defaultSpec = Spec{
 	MaxInflightEviction: 128,
 	InterleavingSize:       4096,
 	PrefetchLog2PageSize:   12, // 4 KiB pages
+
+	EnablePrefetch:           false,
+    PrefetchAlgorithm:        "stride",
+    PrefetchStrideDegree:     4,
+    PrefetchStrideThreshold:  1,
+	PrefetchStrideMaxStreams: 16,
 }
 
 // DefaultSpec returns a copy of the default configuration. Callers typically
@@ -196,6 +203,22 @@ func (b Builder) buildInitialState(
 // address-mapping fields read at Tick time.
 func (b Builder) buildSpec(numSets int) Spec {
 	spec := b.spec
+	if val := os.Getenv("P4_PREFETCH_ENABLE"); val == "1" {
+        spec.EnablePrefetch = true
+        spec.PrefetchAlgorithm = "stride"
+        spec.PrefetchStrideThreshold = 1
+        spec.PrefetchStrideMaxStreams = 16
+        
+        if degStr := os.Getenv("P4_PREFETCH_DEGREE"); degStr != "" {
+            if d, err := strconv.Atoi(degStr); err == nil {
+                spec.PrefetchStrideDegree = d
+            }
+        } else {
+            spec.PrefetchStrideDegree = 4
+        }
+    } else {
+        spec.EnablePrefetch = false
+    }
 	if spec.NumBanks < 1 {
 		spec.NumBanks = 1
 	}

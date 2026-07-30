@@ -61,6 +61,7 @@ func (m *ctrlMiddleware) completePendingDrain() bool {
 	next.CacheState = int(cacheStatePaused)
 	next.CurrentCmdID = 0
 	next.CurrentCmdSrc = ""
+	next.PrintProject4Report()
 	return true
 }
 
@@ -204,6 +205,7 @@ func (m *ctrlMiddleware) handlePause(req memcontrolprotocol.Req) bool {
 	m.ctrlPort().Send(makeCtrlRsp(m.ctrlPort(), memcontrolprotocol.CmdPause,
 		req.Src, req.ID, true, ""))
 	m.ctrlPort().RetrieveIncoming()
+	next.PrintProject4Report()
 	return true
 }
 

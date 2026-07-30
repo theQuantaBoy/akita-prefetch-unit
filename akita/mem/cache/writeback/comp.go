@@ -1,6 +1,7 @@
 package writeback
 
 import (
+	"fmt"
 	"github.com/sarchlab/akita/v5/mem"
 	"github.com/sarchlab/akita/v5/mem/cache"
 	"github.com/sarchlab/akita/v5/mem/vm"
@@ -95,6 +96,14 @@ type State struct {
 	ProcessingFlush         flushReqState `json:"processing_flush"`
 
 	Prefetcher prefetch.Prefetcher `json:"-"`
+
+
+
+	PrefetchRequests uint64 `json:"prefetch_requests"` // all Prefetches
+	PrefetchHits     uint64 `json:"prefetch_hits"`     // good prefetches on hit
+	TotalMisses      uint64 `json:"total_misses"`      // miss
+	PollutionMisses  uint64 `json:"pollution_misses"`  // miss because of fetch
+	PrefetchedBlocks map[uint64]bool `json:"prefetched_blocks"`
 }
 
 // allocTransaction stores t in the Transactions slice and returns its index.
@@ -338,3 +347,29 @@ type Resources struct {
 
 // Comp is the writeback cache component.
 type Comp = modeling.Component[Spec, State, Resources]
+
+
+
+// PrintProjectReport calculates and prints L2 Prefetcher statistics.
+func (s *State) PrintProject4Report() {
+	var coverage, accuracy float64
+
+	if (s.TotalMisses + s.PrefetchHits) > 0 {
+		coverage = (float64(s.PrefetchHits) / float64(s.TotalMisses + s.PrefetchHits)) * 100
+	}
+	if s.PrefetchRequests > 0 {
+		accuracy = (float64(s.PrefetchHits) / float64(s.PrefetchRequests)) * 100
+	}
+
+	fmt.Println("\n==================================================")
+	fmt.Println("       L2 CACHE PREFETCH UNIT - PROJECT 4       ")
+	fmt.Println("==================================================")
+	fmt.Printf(" Prefetch Requests Issued : %d\n", s.PrefetchRequests)
+	fmt.Printf(" Useful Prefetch Hits     : %d\n", s.PrefetchHits)
+	fmt.Printf(" Demand Cache Misses      : %d\n", s.TotalMisses)
+	fmt.Printf(" Pollution Misses         : %d\n", s.PollutionMisses)
+	fmt.Println("--------------------------------------------------")
+	fmt.Printf(" COVERAGE (%%)             : %.2f %%\n", coverage)
+	fmt.Printf(" ACCURACY (%%)             : %.2f %%\n", accuracy)
+	fmt.Println("==================================================\n")
+}

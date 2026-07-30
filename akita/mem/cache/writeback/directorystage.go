@@ -136,7 +136,9 @@ func (ds *directoryStage) doRead(transIdx int, trans *transactionState) bool {
 	}
 
 	ok := ds.handleReadMiss(transIdx, trans)
+
 	if ok && !trans.IsPrefetch {
+		next.TotalMisses++
 		ds.triggerPrefetch(trans)
 	}
 
@@ -176,6 +178,11 @@ func (ds *directoryStage) handleReadHit(
 	if block.IsLocked {
 		return false
 	}
+
+	if next.PrefetchedBlocks != nil && next.PrefetchedBlocks[block.Tag] && !trans.IsPrefetch {
+        next.PrefetchHits++
+        delete(next.PrefetchedBlocks, block.Tag)
+    }
 
 	tracing.AddTaskTag(ds.cache.comp, tracing.TaskTag{
 		TaskID: tracing.MsgIDAtReceiver(&trans.ReadMeta, ds.cache.comp),
@@ -458,6 +465,12 @@ func (ds *directoryStage) evict(
 	}
 
 	cacheLineID, _ := getCacheLineID(addr, spec.Log2BlockSize)
+
+	victim := &next.DirectoryState.Sets[victimSetID].Blocks[victimWayID]
+    if next.PrefetchedBlocks != nil && next.PrefetchedBlocks[victim.Tag] {
+        next.PollutionMisses++
+        delete(next.PrefetchedBlocks, victim.Tag)
+    }
 
 	ds.updateTransForEviction(transIdx, trans, victimSetID, victimWayID, pid, cacheLineID)
 	ds.updateVictimBlockMetaData(victimSetID, victimWayID, cacheLineID, pid)
@@ -762,7 +775,11 @@ func (ds *directoryStage) triggerPrefetch(demandTrans *transactionState) {
 
 		idx := next.allocTransaction(trans)
 		next.DirStageBuf.PushTyped(idx)
-
+		next.PrefetchRequests++
+		if next.PrefetchedBlocks == nil {
+            next.PrefetchedBlocks = make(map[uint64]bool)
+        }
+        next.PrefetchedBlocks[cacheLineID] = true
 		// Debug logging (uncomment for quick terminal inspection):
 		// fmt.Printf("[PREFETCH ISSUED]  Stream 0x%x -> candidate 0x%x (trans[%d])\n",
 		// 	streamID, cacheLineID, idx)
