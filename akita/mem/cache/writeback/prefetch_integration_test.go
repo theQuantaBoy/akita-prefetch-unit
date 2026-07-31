@@ -14,6 +14,7 @@ import (
 	"github.com/sarchlab/akita/v5/modeling"
 	"github.com/sarchlab/akita/v5/noc/directconnection"
 	"github.com/sarchlab/akita/v5/timing"
+	"github.com/sarchlab/akita/v5/tracing"
 )
 
 var _ = Describe("Prefetch Factory and Stream Keying", func() {
@@ -218,6 +219,10 @@ var _ = Describe("Write-Back Cache Prefetch Integration", func() {
 		})
 
 		It("second read to prefetched line hits in cache", func() {
+			tagTracer := tracing.NewTagCountTracer(
+				func(t tracing.TaskStart) bool { return true })
+			tracing.CollectTrace(cacheComp, tagTracer)
+
 			// Seed both the demand address and the next-line candidate.
 			for _, addr := range []uint64{0x0200, 0x0240} {
 				data := make([]byte, 64)
@@ -274,6 +279,12 @@ var _ = Describe("Write-Back Cache Prefetch Integration", func() {
 				}
 			}
 			Expect(responseCount).To(Equal(1))
+
+			// PrefetchNextLineDegree is 2, so the first demand read issues
+			// two prefetches (0x0240 and 0x0280); the second demand read
+			// claims 0x0240 as a hit.
+			Expect(tagTracer.GetTagCount("prefetch-issued")).To(Equal(uint64(2)))
+			Expect(tagTracer.GetTagCount("prefetch-hit")).To(Equal(uint64(1)))
 		})
 	})
 

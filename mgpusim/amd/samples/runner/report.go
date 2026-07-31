@@ -228,7 +228,7 @@ func (r *reporter) injectCacheLatencyTracer(s *simulation.Simulation) {
 }
 
 func (r *reporter) injectCacheHitRateTracer(s *simulation.Simulation) {
-	if !*reportAll && !*cacheLatencyReportFlag {
+	if !*reportAll && !*cacheHitRateReportFlag {
 		return
 	}
 
@@ -545,9 +545,14 @@ func (r *reporter) reportCacheHitRate() {
 		writeHit := tracer.tracer.GetTagCount("write-hit")
 		writeMiss := tracer.tracer.GetTagCount("write-miss")
 		writeMSHRHit := tracer.tracer.GetTagCount("write-mshr-hit")
+		prefetchIssued := tracer.tracer.GetTagCount("prefetch-issued")
+		prefetchHit := tracer.tracer.GetTagCount("prefetch-hit")
+		prefetchMSHRHit := tracer.tracer.GetTagCount("prefetch-mshr-hit")
+		prefetchPollution := tracer.tracer.GetTagCount("prefetch-pollution")
 
 		totalTransaction := readHit + readMiss + readMSHRHit +
-			writeHit + writeMiss + writeMSHRHit
+			writeHit + writeMiss + writeMSHRHit +
+			prefetchIssued + prefetchHit + prefetchMSHRHit + prefetchPollution
 
 		if totalTransaction == 0 {
 			continue
@@ -587,6 +592,30 @@ func (r *reporter) reportCacheHitRate() {
 			Location: tracer.cache.Name(),
 			What:     "write-mshr-hit",
 			Value:    float64(writeMSHRHit),
+			Unit:     "count",
+		})
+		r.dataRecorder.InsertData(tableName, metric{
+			Location: tracer.cache.Name(),
+			What:     "prefetch-issued",
+			Value:    float64(prefetchIssued),
+			Unit:     "count",
+		})
+		r.dataRecorder.InsertData(tableName, metric{
+			Location: tracer.cache.Name(),
+			What:     "prefetch-hit",
+			Value:    float64(prefetchHit),
+			Unit:     "count",
+		})
+		r.dataRecorder.InsertData(tableName, metric{
+			Location: tracer.cache.Name(),
+			What:     "prefetch-mshr-hit",
+			Value:    float64(prefetchMSHRHit),
+			Unit:     "count",
+		})
+		r.dataRecorder.InsertData(tableName, metric{
+			Location: tracer.cache.Name(),
+			What:     "prefetch-pollution",
+			Value:    float64(prefetchPollution),
 			Unit:     "count",
 		})
 	}

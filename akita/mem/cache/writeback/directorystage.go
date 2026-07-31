@@ -124,7 +124,7 @@ func (ds *directoryStage) doRead(transIdx int, trans *transactionState) bool {
 	mshrIdx, found := cache.MSHRQuery(
 		&next.MSHRState, trans.ReadPID, cachelineID)
 	if found {
-		return ds.handleReadMSHRHit(transIdx, trans, mshrIdx)
+		return ds.handleReadMSHRHit(transIdx, trans, mshrIdx, cachelineID)
 	}
 
 	setID, wayID, blockFound := cache.DirectoryLookup(
@@ -149,6 +149,7 @@ func (ds *directoryStage) handleReadMSHRHit(
 	transIdx int,
 	trans *transactionState,
 	mshrIdx int,
+	cachelineID uint64,
 ) bool {
 	next := &ds.cache.comp.State
 
@@ -159,6 +160,19 @@ func (ds *directoryStage) handleReadMSHRHit(
 		transIdx)
 
 	ds.popDirPostBuf()
+
+	// Credits a demand access that catches a prefetch still in flight (its
+	// fetch has an MSHR entry but hasn't installed into the directory yet),
+	// distinct from handleReadHit's check for a prefetch that already
+	// completed. Only the first demand to catch a given in-flight prefetch
+	// claims the tag.
+	if next.PrefetchedBlocks != nil && next.PrefetchedBlocks[cachelineID] && !trans.IsPrefetch {
+		delete(next.PrefetchedBlocks, cachelineID)
+		tracing.AddTaskTag(ds.cache.comp, tracing.TaskTag{
+			TaskID: tracing.MsgIDAtReceiver(&trans.ReadMeta, ds.cache.comp),
+			What:   "prefetch-mshr-hit",
+		})
+	}
 
 	tracing.AddTaskTag(ds.cache.comp, tracing.TaskTag{
 		TaskID: tracing.MsgIDAtReceiver(&trans.ReadMeta, ds.cache.comp),
@@ -182,6 +196,10 @@ func (ds *directoryStage) handleReadHit(
 	if next.PrefetchedBlocks != nil && next.PrefetchedBlocks[block.Tag] && !trans.IsPrefetch {
         next.PrefetchHits++
         delete(next.PrefetchedBlocks, block.Tag)
+        tracing.AddTaskTag(ds.cache.comp, tracing.TaskTag{
+            TaskID: tracing.MsgIDAtReceiver(&trans.ReadMeta, ds.cache.comp),
+            What:   "prefetch-hit",
+        })
     }
 
 	tracing.AddTaskTag(ds.cache.comp, tracing.TaskTag{
@@ -470,6 +488,15 @@ func (ds *directoryStage) evict(
     if next.PrefetchedBlocks != nil && next.PrefetchedBlocks[victim.Tag] {
         next.PollutionMisses++
         delete(next.PrefetchedBlocks, victim.Tag)
+
+        evictorMeta := &trans.ReadMeta
+        if !trans.HasRead {
+            evictorMeta = &trans.WriteMeta
+        }
+        tracing.AddTaskTag(ds.cache.comp, tracing.TaskTag{
+            TaskID: tracing.MsgIDAtReceiver(evictorMeta, ds.cache.comp),
+            What:   "prefetch-pollution",
+        })
     }
 
 	ds.updateTransForEviction(transIdx, trans, victimSetID, victimWayID, pid, cacheLineID)
@@ -780,6 +807,10 @@ func (ds *directoryStage) triggerPrefetch(demandTrans *transactionState) {
             next.PrefetchedBlocks = make(map[uint64]bool)
         }
         next.PrefetchedBlocks[cacheLineID] = true
+		tracing.AddTaskTag(ds.cache.comp, tracing.TaskTag{
+			TaskID: tracing.MsgIDAtReceiver(&trans.ReadMeta, ds.cache.comp),
+			What:   "prefetch-issued",
+		})
 		// Debug logging (uncomment for quick terminal inspection):
 		// fmt.Printf("[PREFETCH ISSUED]  Stream 0x%x -> candidate 0x%x (trans[%d])\n",
 		// 	streamID, cacheLineID, idx)

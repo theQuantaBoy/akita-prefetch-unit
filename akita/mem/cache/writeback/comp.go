@@ -371,5 +371,15 @@ func (s *State) PrintProject4Report() {
 	fmt.Println("--------------------------------------------------")
 	fmt.Printf(" COVERAGE (%%)             : %.2f %%\n", coverage)
 	fmt.Printf(" ACCURACY (%%)             : %.2f %%\n", accuracy)
-	fmt.Println("==================================================\n")
+	fmt.Println("==================================================")
+
+	// This runs on every Drain/Pause completion, not just once at end-of-run,
+	// so the counters are reset here to report per-interval deltas rather
+	// than an ever-growing total. PrefetchedBlocks is not reset: it tracks
+	// which resident blocks are still-unclaimed prefetches, and must persist
+	// across prints for future hit/pollution accounting to work.
+	s.PrefetchRequests = 0
+	s.PrefetchHits = 0
+	s.TotalMisses = 0
+	s.PollutionMisses = 0
 }
