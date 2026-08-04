@@ -2,9 +2,9 @@
 
 A configurable L2 cache prefetch unit for the [Akita](https://github.com/sarchlab/akita) / [MGPUSim](https://github.com/sarchlab/mgpusim) GPU simulator, implementing Stride and Next-Line prefetching algorithms.
 
-> **Computer Architecture — Project 4**
-> Sharif University of Technology, Spring 2025
-> Group 9: Mohsen Salah, Sorouna Kia, Amirhossein Mahboudi
+> **Computer Architecture — Project 4**  
+> Sharif University of Technology, Spring 2025  
+> Group 9: Mohsen Salah, Sorouna Kia, Amirhossein Mahboodi  
 
 ---
 
