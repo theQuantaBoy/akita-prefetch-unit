@@ -104,6 +104,16 @@ type State struct {
 	TotalMisses      uint64 `json:"total_misses"`      // miss
 	PollutionMisses  uint64 `json:"pollution_misses"`  // miss because of fetch
 	PrefetchedBlocks map[uint64]bool `json:"prefetched_blocks"`
+
+	// PrefetchCausedMisses counts demand read misses that land on an address
+	// PollutionEvictedAddrs previously marked as evicted-to-make-room-for-a-
+	// prefetch (see evict() and handleReadMiss() in directorystage.go): a
+	// demand miss that would not have happened had the prefetch not displaced
+	// the block. Each address is attributed to at most one such miss (the
+	// first demand access to reach it after the eviction), matching the
+	// consume-once convention already used by PrefetchedBlocks.
+	PrefetchCausedMisses  uint64          `json:"prefetch_caused_misses"`
+	PollutionEvictedAddrs map[uint64]bool `json:"-"`
 }
 
 // allocTransaction stores t in the Transactions slice and returns its index.
@@ -368,6 +378,7 @@ func (s *State) PrintProject4Report() {
 	fmt.Printf(" Useful Prefetch Hits     : %d\n", s.PrefetchHits)
 	fmt.Printf(" Demand Cache Misses      : %d\n", s.TotalMisses)
 	fmt.Printf(" Pollution Misses         : %d\n", s.PollutionMisses)
+	fmt.Printf(" Misses Caused By That    : %d\n", s.PrefetchCausedMisses)
 	fmt.Println("--------------------------------------------------")
 	fmt.Printf(" COVERAGE (%%)             : %.2f %%\n", coverage)
 	fmt.Printf(" ACCURACY (%%)             : %.2f %%\n", accuracy)
@@ -375,11 +386,13 @@ func (s *State) PrintProject4Report() {
 
 	// This runs on every Drain/Pause completion, not just once at end-of-run,
 	// so the counters are reset here to report per-interval deltas rather
-	// than an ever-growing total. PrefetchedBlocks is not reset: it tracks
-	// which resident blocks are still-unclaimed prefetches, and must persist
-	// across prints for future hit/pollution accounting to work.
+	// than an ever-growing total. PrefetchedBlocks and PollutionEvictedAddrs
+	// are not reset: they track which resident/evicted blocks are still-
+	// unclaimed prefetches, and must persist across prints for future
+	// hit/pollution/caused-miss accounting to work.
 	s.PrefetchRequests = 0
 	s.PrefetchHits = 0
 	s.TotalMisses = 0
 	s.PollutionMisses = 0
+	s.PrefetchCausedMisses = 0
 }

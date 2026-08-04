@@ -20,6 +20,12 @@ var prefetchStrideMaxStreamsFlag = flag.Int("prefetch-stride-max-streams", 16, "
 // NextLine prefetcher parameters
 var prefetchNextLineDegreeFlag = flag.Int("prefetch-nextline-degree", 1, "Lookahead degree for NextLine prefetcher")
 
+// L2CacheSize override, in bytes, total across all memory banks. 0 (the
+// default) means "use the platform default" (2 MB for r9nano).
+var l2CacheSizeFlag = flag.Uint64("l2-cache-size", 0,
+	"Override the total L2 cache size in bytes, summed across all memory "+
+		"banks (0 = use the platform default). Useful for forcing capacity "+
+		"pressure to observe prefetch-driven cache pollution.")
 
 var timingFlag = flag.Bool("timing", false, "Run detailed timing simulation.")
 var maxInstCount = flag.Uint64("max-inst", 0,
@@ -143,6 +149,10 @@ func (r *Runner) parseSimulationFlags() {
 
 		// NextLine parameters
 		r.PrefetchNextLineDegree = *prefetchNextLineDegreeFlag
+	}
+
+	if *l2CacheSizeFlag > 0 {
+		r.L2CacheSize = *l2CacheSizeFlag
 	}
 
 	r.ArchType = parseArchFlag()

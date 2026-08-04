@@ -237,6 +237,7 @@ func (ds *directoryStage) handleReadMiss(transIdx int, trans *transactionState) 
 				TaskID: tracing.MsgIDAtReceiver(&trans.ReadMeta, ds.cache.comp),
 				What:   "read-miss",
 			})
+			ds.checkPrefetchCausedMiss(trans, cacheLineID)
 		}
 
 		return ok
@@ -248,9 +249,33 @@ func (ds *directoryStage) handleReadMiss(transIdx int, trans *transactionState) 
 			TaskID: tracing.MsgIDAtReceiver(&trans.ReadMeta, ds.cache.comp),
 			What:   "read-miss",
 		})
+		ds.checkPrefetchCausedMiss(trans, cacheLineID)
 	}
 
 	return ok
+}
+
+// checkPrefetchCausedMiss attributes a demand read miss on cacheLineID to a
+// prior prefetch-driven eviction, if PollutionEvictedAddrs still has that
+// address marked (i.e., no demand access has claimed it yet since the
+// eviction in evict()). Only demand accesses are attributed — a prefetch's
+// own synthetic re-fetch of the same address is not "caused" by pollution in
+// the sense the PDF metric asks for, matching the same !trans.IsPrefetch
+// convention handleReadHit() and handleReadMSHRHit() already use.
+func (ds *directoryStage) checkPrefetchCausedMiss(trans *transactionState, cacheLineID uint64) {
+	next := &ds.cache.comp.State
+
+	if trans.IsPrefetch || next.PollutionEvictedAddrs == nil || !next.PollutionEvictedAddrs[cacheLineID] {
+		return
+	}
+
+	next.PrefetchCausedMisses++
+	delete(next.PollutionEvictedAddrs, cacheLineID)
+
+	tracing.AddTaskTag(ds.cache.comp, tracing.TaskTag{
+		TaskID: tracing.MsgIDAtReceiver(&trans.ReadMeta, ds.cache.comp),
+		What:   "prefetch-caused-miss",
+	})
 }
 
 func (ds *directoryStage) doWrite(transIdx int, trans *transactionState) bool {
@@ -454,6 +479,45 @@ func (ds *directoryStage) writeToBank(
 	return true
 }
 
+// checkPollutionOnVictim records pollution bookkeeping for the block about
+// to be overwritten, if it is currently a valid, still-unclaimed prefetched
+// block (i.e., no demand access has hit or MSHR-hit it since it was
+// prefetched — see PrefetchedBlocks in handleReadHit()/handleReadMSHRHit()).
+//
+// This must be called from every path that overwrites a directory slot's
+// tag with a different address, not only evict(): a clean victim (never
+// written) takes the fetch() path rather than evict() (needEviction()
+// requires IsDirty), and for read-heavy workloads clean victims are the
+// common case. Checking only in evict(), as originally implemented, made
+// prefetch-pollution near-impossible to observe on read-dominated
+// benchmarks regardless of cache size.
+func (ds *directoryStage) checkPollutionOnVictim(
+	victim *cache.BlockState,
+	evictorMeta messaging.Msg,
+) {
+	next := &ds.cache.comp.State
+
+	if !victim.IsValid || next.PrefetchedBlocks == nil || !next.PrefetchedBlocks[victim.Tag] {
+		return
+	}
+
+	next.PollutionMisses++
+	delete(next.PrefetchedBlocks, victim.Tag)
+
+	// Remember this address as displaced-by-prefetch so a later demand miss
+	// that lands back on it can be attributed to this eviction (see the
+	// PollutionEvictedAddrs check in checkPrefetchCausedMiss()).
+	if next.PollutionEvictedAddrs == nil {
+		next.PollutionEvictedAddrs = make(map[uint64]bool)
+	}
+	next.PollutionEvictedAddrs[victim.Tag] = true
+
+	tracing.AddTaskTag(ds.cache.comp, tracing.TaskTag{
+		TaskID: tracing.MsgIDAtReceiver(evictorMeta, ds.cache.comp),
+		What:   "prefetch-pollution",
+	})
+}
+
 func (ds *directoryStage) evict(
 	transIdx int,
 	trans *transactionState,
@@ -485,19 +549,11 @@ func (ds *directoryStage) evict(
 	cacheLineID, _ := getCacheLineID(addr, spec.Log2BlockSize)
 
 	victim := &next.DirectoryState.Sets[victimSetID].Blocks[victimWayID]
-    if next.PrefetchedBlocks != nil && next.PrefetchedBlocks[victim.Tag] {
-        next.PollutionMisses++
-        delete(next.PrefetchedBlocks, victim.Tag)
-
-        evictorMeta := &trans.ReadMeta
-        if !trans.HasRead {
-            evictorMeta = &trans.WriteMeta
-        }
-        tracing.AddTaskTag(ds.cache.comp, tracing.TaskTag{
-            TaskID: tracing.MsgIDAtReceiver(evictorMeta, ds.cache.comp),
-            What:   "prefetch-pollution",
-        })
-    }
+	evictorMeta := &trans.ReadMeta
+	if !trans.HasRead {
+		evictorMeta = &trans.WriteMeta
+	}
+	ds.checkPollutionOnVictim(victim, evictorMeta)
 
 	ds.updateTransForEviction(transIdx, trans, victimSetID, victimWayID, pid, cacheLineID)
 	ds.updateVictimBlockMetaData(victimSetID, victimWayID, cacheLineID, pid)
@@ -605,6 +661,14 @@ func (ds *directoryStage) fetch(
 	if !bankBuf.CanPush() {
 		return false
 	}
+
+	// fetch() overwrites whatever block currently occupies (setID, wayID)
+	// with cacheLineID's data. When that victim is clean (never written),
+	// handleReadMiss()/writePartialLineMiss() route here instead of evict()
+	// (needEviction() requires IsDirty) -- so this is the only place a clean
+	// victim's pollution gets recorded.
+	victim := &next.DirectoryState.Sets[setID].Blocks[wayID]
+	ds.checkPollutionOnVictim(victim, reqMeta)
 
 	mshrIdx := cache.MSHRAdd(
 		&next.MSHRState, spec.NumMSHREntry,

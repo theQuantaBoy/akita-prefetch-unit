@@ -549,10 +549,12 @@ func (r *reporter) reportCacheHitRate() {
 		prefetchHit := tracer.tracer.GetTagCount("prefetch-hit")
 		prefetchMSHRHit := tracer.tracer.GetTagCount("prefetch-mshr-hit")
 		prefetchPollution := tracer.tracer.GetTagCount("prefetch-pollution")
+		prefetchCausedMiss := tracer.tracer.GetTagCount("prefetch-caused-miss")
 
 		totalTransaction := readHit + readMiss + readMSHRHit +
 			writeHit + writeMiss + writeMSHRHit +
-			prefetchIssued + prefetchHit + prefetchMSHRHit + prefetchPollution
+			prefetchIssued + prefetchHit + prefetchMSHRHit + prefetchPollution +
+			prefetchCausedMiss
 
 		if totalTransaction == 0 {
 			continue
@@ -616,6 +618,12 @@ func (r *reporter) reportCacheHitRate() {
 			Location: tracer.cache.Name(),
 			What:     "prefetch-pollution",
 			Value:    float64(prefetchPollution),
+			Unit:     "count",
+		})
+		r.dataRecorder.InsertData(tableName, metric{
+			Location: tracer.cache.Name(),
+			What:     "prefetch-caused-miss",
+			Value:    float64(prefetchCausedMiss),
 			Unit:     "count",
 		})
 	}

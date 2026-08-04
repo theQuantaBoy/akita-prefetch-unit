@@ -47,6 +47,7 @@ type Runner struct {
 	PrefetchStrideThreshold  uint32
 	PrefetchStrideMaxStreams int
 	PrefetchNextLineDegree   int
+	L2CacheSize              uint64
 }
 
 // Init initializes the platform simulate
@@ -125,6 +126,10 @@ func (r *Runner) buildTimingPlatform() {
 			r.PrefetchStrideMaxStreams,
 			r.PrefetchNextLineDegree,
 		)
+	}
+
+	if r.L2CacheSize > 0 {
+		b = b.WithL2CacheSize(r.L2CacheSize)
 	}
 
 	if *magicMemoryCopy {

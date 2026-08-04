@@ -53,6 +53,7 @@ type Builder struct {
 	prefetchStrideThreshold  uint32
 	prefetchStrideMaxStreams int
 	prefetchNextLineDegree   int
+	l2CacheSize              uint64
 }
 
 // MakeBuilder creates a new Builder with default parameters.
@@ -111,6 +112,16 @@ func (b Builder) WithPrefetch(
 	b.prefetchStrideMaxStreams = strideMaxStreams
 	b.prefetchNextLineDegree = nextLineDegree
 
+	return b
+}
+
+// WithL2CacheSize overrides the total L2 cache size (in bytes, summed across
+// all memory banks) from the platform default. Forwarded to whichever
+// platform-specific GPU builder (r9nano or mi300x) is active; both already
+// expose a WithL2CacheSize(uint64) Builder method used internally to size
+// each memory bank's L2 slice.
+func (b Builder) WithL2CacheSize(size uint64) Builder {
+	b.l2CacheSize = size
 	return b
 }
 
@@ -256,6 +267,10 @@ func (b *Builder) createGPUBuilder(
 			)
 		}
 
+		if b.l2CacheSize > 0 {
+			mBuilder = mBuilder.WithL2CacheSize(b.l2CacheSize)
+		}
+
 		return mBuilder.
 			WithGlobalStorage(b.globalStorage).
 			WithDriverPort(driverPort)
@@ -274,6 +289,10 @@ func (b *Builder) createGPUBuilder(
 				b.prefetchStrideMaxStreams,
 				b.prefetchNextLineDegree,
 			)
+		}
+
+		if b.l2CacheSize > 0 {
+			rBuilder = rBuilder.WithL2CacheSize(b.l2CacheSize)
 		}
 
 		return rBuilder.
