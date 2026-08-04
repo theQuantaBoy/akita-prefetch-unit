@@ -14,10 +14,8 @@ echo "Benchmark,Config,SimTime_s,RealTime_s,HitRate_Pct,MissRate_Pct,MSHRHitRate
 
 echo -e "\033[1;36m>>> [2/3] Running benchmark configurations...\033[0m"
 
-# Both format strings share the same field widths so header and data rows
-# line up; the separator is generated from the printed header itself (one
-# "-" per character) rather than a hand-counted string, so it can never
-# drift out of sync with the columns again.
+# separator is derived from header_line's own length so it can't drift
+# out of sync with the columns.
 HEADER_FMT="%-16s | %-15s | %-10s | %-11s | %-8s | %-9s | %-9s | %-10s | %-9s | %-9s | %-9s | %-9s | %-9s | %-8s\n"
 ROW_FMT="%-16s | %-15s | %-10s | %-11s | %-8.2f | %-9.2f | %-9.2f | %-10.2f | %-9.2f | %-9.2f | %-9.2f | %-9.0f | %-9.0f | %-8.0f\n"
 
@@ -30,11 +28,8 @@ printf "%s\n" "$header_line"
 echo "$separator"
 
 # Arguments: Name | Config | Binary & Flags
-# run_test maps config to the real prefetch CLI flags, runs the binary, and
-# uses analyze_metrics.py to compute Coverage/Accuracy/Hit-Miss rates from
-# its .sqlite3 output. SimTime is the simulated GPU kernel time reported by
-# the simulator itself; RealTime is the actual wall-clock time this script
-# spent running the binary, measured independently around the process.
+# SimTime is the simulator's reported kernel time; RealTime is this
+# script's own wall-clock measurement around the process.
 run_test() {
     local bench_name="$1"
     local config="$2"
@@ -48,15 +43,9 @@ run_test() {
         stride_t2) prefetch_flags=(-enable-prefetch -prefetch-algorithm=stride -prefetch-stride-degree=4 -prefetch-stride-threshold=2) ;;
         stride_t4) prefetch_flags=(-enable-prefetch -prefetch-algorithm=stride -prefetch-stride-degree=4 -prefetch-stride-threshold=4) ;;
         nextline) prefetch_flags=(-enable-prefetch -prefetch-algorithm=nextline -prefetch-nextline-degree=2) ;;
-        # A deliberately tiny 16 KiB L2 (the minimum size the cache-set math
-        # tolerates without NumSets rounding to 0 -- see r9nano's
-        # l2CacheSize/numMemoryBank/WayAssociativity/blockSize division). At
-        # the platform-default 2 MB L2, none of these benchmarks' working
-        # sets create enough capacity pressure to evict a still-unclaimed
-        # prefetched block, so PollutedBlocks/CausedMisses (the PDF's
-        # "blocks replaced due to prefetch" / "misses caused by that"
-        # metrics) stay at 0 for every config above. Shrinking the L2 forces
-        # real eviction pressure so those two metrics are actually observed.
+        # Tiny 16 KiB L2 (min size before NumSets rounds to 0) forces
+        # eviction pressure -- at the 2MB default, PollutedBlocks/CausedMisses
+        # never leave 0.
         nextline_small) prefetch_flags=(-enable-prefetch -prefetch-algorithm=nextline -prefetch-nextline-degree=2 -l2-cache-size=16384) ;;
         *) echo "run_test: unknown config '$config'" >&2; exit 1 ;;
     esac
@@ -121,14 +110,9 @@ run_benchmark "MatrixTranspose" "base stride_t1 nextline nextline_small" ./matri
 # NextLine gets real, useful coverage.
 run_benchmark "SPMV" "base stride_t1 nextline" ./spmv_bin -timing -dim 128 -report-all
 
-# SPMV's nextline_small needs its own, larger -dim: at dim=128 SPMV issues
-# only ~73 prefetches total, so even with the small L2 forcing pollution, an
-# evicted-but-unclaimed prefetched block is essentially never revisited
-# before the kernel ends -- CausedMisses stays 0 no matter the cache size or
-# prefetch degree (verified by sweeping both). Bumping -dim to 768 (keeping
-# the same degree=2 as every other benchmark's nextline_small row) gives
-# SPMV enough repeat traffic that evicted blocks do get revisited, so
-# CausedMisses is finally observed as nonzero.
+# SPMV needs a bigger -dim: at 128 it issues too few prefetches (~73) for
+# an evicted block to ever get revisited, so CausedMisses stays 0 no
+# matter the cache size/degree (verified by sweeping both) -- 768 fixes it.
 run_test "SPMV" "nextline_small" ./spmv_bin -timing -dim 768 -report-all
 
 echo "$separator"

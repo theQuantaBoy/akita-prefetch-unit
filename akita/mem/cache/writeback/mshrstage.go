@@ -117,11 +117,8 @@ func (s *mshrStage) respondRead(
 	dataReady.TrafficClass = "memprotocol.DataReadyRsp"
 	s.cache.topPort().Send(dataReady)
 
-	// This request waited for the fetched line to be written into the bank by
-	// the fetcher and resolved through this MSHR stage. It never visited the
-	// bank itself (only the fetcher did), so that wait is a dependency, not its
-	// own work — record it so the interval since the fill-data milestone is not
-	// an unexplained tail before the response.
+	// This request never visited the bank itself (only the fetcher did),
+	// so record the wait as a dependency milestone, not its own work.
 	tracing.AddMilestone(s.cache.comp, tracing.Milestone{
 		TaskID: tracing.MsgIDAtReceiver(&trans.ReadMeta, s.cache.comp),
 		Kind:   tracing.MilestoneKindDependency,

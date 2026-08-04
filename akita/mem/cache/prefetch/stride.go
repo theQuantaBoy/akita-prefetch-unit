@@ -51,31 +51,22 @@ type StrideConfig struct {
 	// >= 1.
 	Degree int
 
-	// Log2BlockSize is log2 of the cache block size, in bytes. Observed
-	// addresses and generated candidates are aligned down to this
-	// granularity before stride detection, so accesses within the same
-	// block never register as a new stride.
+	// Log2BlockSize is log2 of the cache block size; addresses are
+	// aligned down to it before stride detection.
 	Log2BlockSize uint64
 
-	// Log2PageSize is log2 of the page size, in bytes, of the address
-	// space the prefetcher observes. A candidate that would land on a
-	// different page than the access that triggered it is suppressed,
-	// since a stride learned within one page says nothing about how the
-	// next page is mapped.
+	// Log2PageSize is log2 of the page size; candidates crossing into a
+	// different page than the triggering access are suppressed.
 	Log2PageSize uint64
 
-	// MaxStreams caps the number of concurrently tracked streams. When a
-	// stream that is not already in the table is accessed while the table
-	// is at capacity, the least-recently-touched stream is evicted to
-	// make room. Must be >= 1.
+	// MaxStreams caps concurrently tracked streams; at capacity the
+	// least-recently-touched stream is evicted. Must be >= 1.
 	MaxStreams int
 }
 
-// streamState is the per-stream learned state tracked by a
-// StridePrefetcher. confidence == 0 is the sentinel for "no stride guessed
-// yet" (StateInitial); it is otherwise never reset back to 0; a broken
-// pattern instead adopts the newly observed delta at confidence 1 (see
-// StridePrefetcher.Access).
+// streamState is the per-stream learned state. confidence == 0 means no
+// stride guessed yet (StateInitial); a broken pattern re-seeds at
+// confidence 1 rather than resetting to 0 (see Access).
 type streamState struct {
 	id         StreamID
 	hasAddr    bool
@@ -97,24 +88,14 @@ func (s *streamState) state(threshold uint32) State {
 	}
 }
 
-// StridePrefetcher implements Prefetcher using classic per-stream stride
-// detection: it tracks the last address and stride observed on each
-// stream, builds confidence as the same stride repeats on consecutive
-// accesses, and — once confident (StateSteady) — predicts that the pattern
-// continues, emitting up to Degree candidate addresses ahead of the
-// triggering access. An access whose delta from the last one does not
-// match the learned stride immediately unlearns the stream, dropping its
-// confidence and adopting the just-observed delta as a fresh guess, rather
-// than continuing to prefetch against a pattern that has already broken.
-//
-// StridePrefetcher is not safe for concurrent use.
+// StridePrefetcher implements Prefetcher via per-stream stride detection:
+// confidence builds as a stride repeats, predicting Degree addresses ahead
+// once steady; a broken pattern re-seeds immediately. Not concurrent-safe.
 type StridePrefetcher struct {
 	cfg StrideConfig
 
-	// order tracks stream recency: the front element is the
-	// least-recently-touched stream (the next eviction victim) and the
-	// back element is the most-recently-touched one. Each element's Value
-	// is a *streamState.
+	// order tracks stream recency (front = LRU victim, back = MRU); each
+	// Value is a *streamState.
 	order   *list.List
 	streams map[StreamID]*list.Element
 }
@@ -122,10 +103,8 @@ type StridePrefetcher struct {
 // Compile-time assertion that StridePrefetcher satisfies Prefetcher.
 var _ Prefetcher = (*StridePrefetcher)(nil)
 
-// NewStridePrefetcher constructs a StridePrefetcher from cfg. It panics if
-// cfg has a non-positive ConfidenceThreshold, Degree, or MaxStreams, since
-// any of those would describe a prefetcher that could never usefully
-// predict or track anything.
+// NewStridePrefetcher constructs a StridePrefetcher from cfg. Panics if
+// ConfidenceThreshold, Degree, or MaxStreams is non-positive.
 func NewStridePrefetcher(cfg StrideConfig) *StridePrefetcher {
 	if cfg.ConfidenceThreshold == 0 {
 		panic("prefetch: ConfidenceThreshold must be >= 1")
@@ -158,12 +137,8 @@ func (p *StridePrefetcher) Access(stream StreamID, addr uint64) []uint64 {
 		return nil
 	}
 
-	// Subtract in the unsigned domain first (wraps mod 2^64, matching
-	// two's-complement semantics exactly) and reinterpret the bit pattern
-	// as signed once, rather than reinterpreting each operand up front —
-	// this keeps the full-width address values out of the signed domain
-	// entirely and confines the sign reinterpretation to the difference,
-	// which is the only value that ever needs to be negative.
+	// Subtract unsigned first (wraps correctly mod 2^64), then
+	// reinterpret only the difference as signed.
 	delta := int64(blockAddr - s.lastAddr)
 	s.lastAddr = blockAddr
 
@@ -259,22 +234,17 @@ func (p *StridePrefetcher) evictLRU() {
 	delete(p.streams, victim.id)
 }
 
-// candidates generates up to Degree prefetch-candidate addresses ahead of
-// triggerAddr along stride, stopping as soon as a candidate would cross
-// onto a different page than triggerAddr. Since candidates advance
-// monotonically by stride, once one candidate crosses the page boundary
-// every subsequent one would too, so the loop can stop rather than merely
-// skip.
+// candidates generates up to Degree addresses ahead of triggerAddr along
+// stride, stopping at the first one that crosses a page boundary (later
+// candidates would too, since they advance monotonically).
 func (p *StridePrefetcher) candidates(triggerAddr uint64, stride int64) []uint64 {
 	triggerPage := triggerAddr >> p.cfg.Log2PageSize
 
 	result := make([]uint64, 0, p.cfg.Degree)
 
 	for i := 1; i <= p.cfg.Degree; i++ {
-		// Only the offset (i*stride) is computed in the signed domain;
-		// triggerAddr stays uint64 throughout and the offset is added back
-		// via unsigned (wrapping) addition, the same reasoning as in
-		// Access's delta computation.
+		// Offset is computed in the signed domain, then added back via
+		// unsigned wrapping addition (see Access's delta comment).
 		offset := uint64(int64(i) * stride)
 		candidate := triggerAddr + offset
 		if candidate>>p.cfg.Log2PageSize != triggerPage {

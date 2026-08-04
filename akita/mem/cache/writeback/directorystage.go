@@ -161,11 +161,8 @@ func (ds *directoryStage) handleReadMSHRHit(
 
 	ds.popDirPostBuf()
 
-	// Credits a demand access that catches a prefetch still in flight (its
-	// fetch has an MSHR entry but hasn't installed into the directory yet),
-	// distinct from handleReadHit's check for a prefetch that already
-	// completed. Only the first demand to catch a given in-flight prefetch
-	// claims the tag.
+	// Credits a demand access that catches a prefetch still in flight
+	// (handleReadHit credits one already installed in the directory).
 	if next.PrefetchedBlocks != nil && next.PrefetchedBlocks[cachelineID] && !trans.IsPrefetch {
 		delete(next.PrefetchedBlocks, cachelineID)
 		tracing.AddTaskTag(ds.cache.comp, tracing.TaskTag{
@@ -255,13 +252,9 @@ func (ds *directoryStage) handleReadMiss(transIdx int, trans *transactionState) 
 	return ok
 }
 
-// checkPrefetchCausedMiss attributes a demand read miss on cacheLineID to a
-// prior prefetch-driven eviction, if PollutionEvictedAddrs still has that
-// address marked (i.e., no demand access has claimed it yet since the
-// eviction in evict()). Only demand accesses are attributed — a prefetch's
-// own synthetic re-fetch of the same address is not "caused" by pollution in
-// the sense the PDF metric asks for, matching the same !trans.IsPrefetch
-// convention handleReadHit() and handleReadMSHRHit() already use.
+// checkPrefetchCausedMiss attributes a demand miss on cacheLineID to a
+// prior prefetch eviction still marked in PollutionEvictedAddrs. Only
+// demand accesses count, not the prefetch's own re-fetch.
 func (ds *directoryStage) checkPrefetchCausedMiss(trans *transactionState, cacheLineID uint64) {
 	next := &ds.cache.comp.State
 
@@ -479,18 +472,9 @@ func (ds *directoryStage) writeToBank(
 	return true
 }
 
-// checkPollutionOnVictim records pollution bookkeeping for the block about
-// to be overwritten, if it is currently a valid, still-unclaimed prefetched
-// block (i.e., no demand access has hit or MSHR-hit it since it was
-// prefetched — see PrefetchedBlocks in handleReadHit()/handleReadMSHRHit()).
-//
-// This must be called from every path that overwrites a directory slot's
-// tag with a different address, not only evict(): a clean victim (never
-// written) takes the fetch() path rather than evict() (needEviction()
-// requires IsDirty), and for read-heavy workloads clean victims are the
-// common case. Checking only in evict(), as originally implemented, made
-// prefetch-pollution near-impossible to observe on read-dominated
-// benchmarks regardless of cache size.
+// checkPollutionOnVictim records pollution when the overwritten block is
+// still an unclaimed prefetch. Called from every overwrite path, not just
+// evict() -- clean victims (the common case) go through fetch() instead.
 func (ds *directoryStage) checkPollutionOnVictim(
 	victim *cache.BlockState,
 	evictorMeta messaging.Msg,
@@ -662,11 +646,8 @@ func (ds *directoryStage) fetch(
 		return false
 	}
 
-	// fetch() overwrites whatever block currently occupies (setID, wayID)
-	// with cacheLineID's data. When that victim is clean (never written),
-	// handleReadMiss()/writePartialLineMiss() route here instead of evict()
-	// (needEviction() requires IsDirty) -- so this is the only place a clean
-	// victim's pollution gets recorded.
+	// Only place a clean victim's pollution gets recorded — clean victims
+	// route here instead of evict() (needEviction() requires dirty).
 	victim := &next.DirectoryState.Sets[setID].Blocks[wayID]
 	ds.checkPollutionOnVictim(victim, reqMeta)
 
@@ -791,17 +772,10 @@ func (ds *directoryStage) popDirPostBuf() {
 	next.DirPostPipelineBuf.Pop()
 }
 
-// triggerPrefetch invokes the configured prefetcher with the address accessed
-// by the demand read miss, filters the returned candidates against the
-// directory and MSHR, and creates synthetic read-miss transactions (with
-// IsPrefetch set) that flow through the normal miss pipeline. The prefetched
-// data eventually lands in the cache but no response is sent to Top.
+// triggerPrefetch asks the prefetcher for candidates from demandTrans's
+// address, filters them against the directory/MSHR, and issues synthetic
+// IsPrefetch read transactions through the normal miss pipeline.
 func (ds *directoryStage) triggerPrefetch(demandTrans *transactionState) {
-	// Debug logging (uncomment for quick terminal inspection):
-	// fmt.Printf("[PREFETCH CALLED]  addr=0x%x pid=%d src=%s prefetcherNil=%v\n",
-	// 	demandTrans.ReadAddress, demandTrans.ReadPID,
-	// 	demandTrans.ReadMeta.Src, ds.cache.prefetcher == nil)
-
 	spec := ds.cache.comp.Spec()
 	next := &ds.cache.comp.State
 
@@ -812,12 +786,6 @@ func (ds *directoryStage) triggerPrefetch(demandTrans *transactionState) {
 	blockSize := uint64(1 << spec.Log2BlockSize)
 	streamID := streamIDFor(demandTrans.ReadPID, demandTrans.ReadMeta.Src)
 	candidates := ds.cache.prefetcher.Access(streamID, demandTrans.ReadAddress)
-
-	// Debug logging (uncomment for quick terminal inspection):
-	// if len(candidates) > 0 {
-	// 	fmt.Printf("[PREFETCH TRIGGER] Stream 0x%x | demand 0x%x -> %d candidate(s)\n",
-	// 		streamID, demandTrans.ReadAddress, len(candidates))
-	// }
 
 	for _, addr := range candidates {
 		cacheLineID, _ := getCacheLineID(addr, spec.Log2BlockSize)
@@ -847,10 +815,8 @@ func (ds *directoryStage) triggerPrefetch(demandTrans *transactionState) {
 			return
 		}
 
-		// Create a synthetic read transaction whose ReadMeta reuses
-		// the demand requester's Src so the prefetcher can train per-
-		// stream, but with a fresh, internal-only ID that is never
-		// responded to on Top.
+		// Synthetic read reusing the requester's Src (for per-stream
+		// training) but a fresh, internal-only ID never responded to.
 		trans := transactionState{
 			ID:                 timing.GetIDGenerator().Generate(),
 			HasRead:            true,
@@ -875,8 +841,5 @@ func (ds *directoryStage) triggerPrefetch(demandTrans *transactionState) {
 			TaskID: tracing.MsgIDAtReceiver(&trans.ReadMeta, ds.cache.comp),
 			What:   "prefetch-issued",
 		})
-		// Debug logging (uncomment for quick terminal inspection):
-		// fmt.Printf("[PREFETCH ISSUED]  Stream 0x%x -> candidate 0x%x (trans[%d])\n",
-		// 	streamID, cacheLineID, idx)
 	}
 }

@@ -12,20 +12,13 @@ type NextLineConfig struct {
 	// sequential blocks ahead of it are computed.
 	Log2BlockSize uint64
 
-	// Log2PageSize is log2 of the page size, in bytes. A candidate that
-	// would land on a different page than the triggering access is
-	// suppressed, since the next block sequentially need not belong to
-	// the same page-backed allocation.
+	// Log2PageSize is log2 of the page size; candidates crossing into a
+	// different page than the triggering access are suppressed.
 	Log2PageSize uint64
 }
 
-// NextLinePrefetcher implements Prefetcher with the simplest possible
-// strategy: every access unconditionally prefetches the Degree cache
-// blocks immediately following it, regardless of stream or access
-// history. Unlike StridePrefetcher it carries no per-stream learned state
-// at all — stream is accepted only to satisfy the Prefetcher interface —
-// so its prediction for a given address never depends on what was
-// observed before it, and Reset is a no-op.
+// NextLinePrefetcher implements Prefetcher by always prefetching the next
+// Degree blocks after every access, with no per-stream state or history.
 type NextLinePrefetcher struct {
 	cfg NextLineConfig
 }

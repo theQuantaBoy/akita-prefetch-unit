@@ -36,19 +36,9 @@ func newPrefetcher(spec Spec) prefetch.Prefetcher {
 	}
 }
 
-// streamIDFor derives a prefetch.StreamID that disambiguates concurrent
-// requesters sharing one process: pid alone is not enough, since a whole
-// GPU kernel launch (many concurrent wavefronts/compute units) typically
-// runs under a single PID, and feeding their interleaved accesses into one
-// shared stride stream would look like noise to the confidence FSM. src is
-// the requester's port (preserved on the transaction from the original
-// ReadReq's MsgMeta), which — unlike PID — actually distinguishes one
-// upstream L1/compute unit from another.
-//
-// messaging.RemotePort is a plain string with no numeric identity, so it is
-// folded into the key via FNV-1a rather than combined bitwise; a hash
-// collision only degrades prediction accuracy (two requesters sharing a
-// stream table entry), it can never affect correctness.
+// streamIDFor keys a stream by (pid, src): pid alone would lump an entire
+// kernel's concurrent wavefronts into one noisy stride stream, so src (the
+// requester's port, hashed via FNV-1a) disambiguates them.
 func streamIDFor(pid vm.PID, src messaging.RemotePort) prefetch.StreamID {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(src))

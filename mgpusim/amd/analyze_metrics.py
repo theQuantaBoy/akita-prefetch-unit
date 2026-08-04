@@ -2,32 +2,16 @@
 """Computes corrected L2 prefetch metrics from mgpusim's mgpusim_metrics.sqlite3
 output (produced by -report-all).
 
-Raw read-miss/read-hit/read-mshr-hit tags don't distinguish demand traffic
-from the prefetcher's own synthetic reads: an issued prefetch goes through
-the same doRead() miss path a demand access does, so its own fetch is tagged
-read-miss just like a real demand miss. Subtracting prefetch-issued out of
-read-miss recovers the true demand-only miss count.
+read-miss also counts the prefetcher's own synthetic fetches (same doRead()
+path as a demand miss), so demand misses = read-miss - prefetch-issued.
+prefetch-hit and prefetch-mshr-hit both count as "useful" prefetches.
 
-A demand access can also benefit from a prefetch in two different ways: the
-prefetch had already completed (prefetch-hit), or the access caught it still
-in flight in the MSHR (prefetch-mshr-hit). Both count as "useful" below.
+MSHRHitRate% is relative to all demand accesses (so Hit%+Miss%+MSHRHit% sum
+to 100%). MSHRMissRate% is relative only to MSHR traffic (demand misses +
+MSHR hits) -- additive info, not MSHRHitRate%'s complement.
 
-MSHR Miss Rate has no single standard definition (the assignment PDF lists it
-alongside MSHR Hit Rate without one). MSHRHitRate% here is deliberately kept
-relative to *all* demand accesses, so that HitRate% + MissRate% + MSHRHitRate%
-sum to 100% of demand traffic. MSHRMissRate% is instead defined relative only
-to the population of accesses that had to interact with the MSHR at all
-(i.e., excluding accesses that hit outright in the directory): of those,
-how many needed a brand new MSHR entry (a "true" miss) vs. merged into one
-already in flight (an MSHR hit). This is additive information, not the
-complement of MSHRHitRate%, and needs no new simulator instrumentation --
-demand_misses and read-mshr-hit are already tracked.
-
-prefetch-pollution counts blocks evicted while still an unclaimed prefetch
-(PDF: "number of blocks replaced due to prefetching"). prefetch-caused-miss
-is a new tag: it fires when a later demand access misses on exactly one of
-those evicted addresses, i.e. a miss that would not have happened had the
-prefetch not displaced the block (PDF: "number of misses caused by that").
+prefetch-pollution: a block evicted while still an unclaimed prefetch.
+prefetch-caused-miss: a later demand miss on one of those addresses.
 """
 
 import argparse
@@ -98,10 +82,8 @@ def compute_metrics(sums):
         prefetch_issued - prefetch_hit - prefetch_mshr_hit - prefetch_pollution
     )
 
-    # Population of accesses that had to interact with the MSHR at all (i.e.
-    # everything except an outright directory hit): a "true" miss allocates a
-    # fresh entry, an MSHR hit merges into one already outstanding. See the
-    # module docstring for why this differs from MSHRHitRate%'s denominator.
+    # Everything except an outright directory hit (see docstring for why
+    # this differs from MSHRHitRate%'s denominator).
     mshr_traffic = demand_misses + read_mshr_hit
 
     def ratio(numerator, denominator):
@@ -137,12 +119,12 @@ COLUMNS = [
     ("PollutedBlocks", "{:>14.0f}"),
     ("CausedMisses", "{:>12.0f}"),
     ("PrefetchIssued", "{:>14.0f}"),
-    ("ExecTime(s)", "{:>13}"),
+    ("ExecTime(s)", "{:>10}"),
 ]
 
 
 def format_row(name, m):
-    exec_time = "n/a" if m["kernel_time"] is None else f'{m["kernel_time"]:.6e}'
+    exec_time = "n/a" if m["kernel_time"] is None else f'{m["kernel_time"]:.2e}'
     values = [
         name,
         m["hit_rate"],
@@ -190,7 +172,7 @@ def main():
             print(f"error reading {args.db_files[0]}: {e}", file=sys.stderr)
             sys.exit(1)
         m = compute_metrics(sums)
-        kernel_time = "NA" if m["kernel_time"] is None else f'{m["kernel_time"]:.6e}'
+        kernel_time = "NA" if m["kernel_time"] is None else f'{m["kernel_time"]:.2e}'
         print(
             f'{m["hit_rate"]:.4f},{m["miss_rate"]:.4f},{m["mshr_hit_rate"]:.4f},'
             f'{m["mshr_miss_rate"]:.4f},'

@@ -105,13 +105,9 @@ type State struct {
 	PollutionMisses  uint64 `json:"pollution_misses"`  // miss because of fetch
 	PrefetchedBlocks map[uint64]bool `json:"prefetched_blocks"`
 
-	// PrefetchCausedMisses counts demand read misses that land on an address
-	// PollutionEvictedAddrs previously marked as evicted-to-make-room-for-a-
-	// prefetch (see evict() and handleReadMiss() in directorystage.go): a
-	// demand miss that would not have happened had the prefetch not displaced
-	// the block. Each address is attributed to at most one such miss (the
-	// first demand access to reach it after the eviction), matching the
-	// consume-once convention already used by PrefetchedBlocks.
+	// PrefetchCausedMisses counts demand misses on a block previously
+	// evicted to make room for a prefetch (see directorystage.go). Each
+	// address is attributed to at most one such miss.
 	PrefetchCausedMisses  uint64          `json:"prefetch_caused_misses"`
 	PollutionEvictedAddrs map[uint64]bool `json:"-"`
 }
@@ -298,13 +294,9 @@ type transactionState struct {
 	MSHRData               []byte `json:"mshr_data"`
 	MSHRTransactionIndices []int  `json:"mshr_transaction_indices"`
 
-	// IsPrefetch marks this transaction as a self-issued speculative fetch
-	// with no real requester on Top: it was never received at the topParser,
-	// so its ReadMeta is a synthetic, internal-only key rather than a message
-	// that can be responded to. It otherwise runs through the exact same
-	// directory/MSHR/bank/write-buffer path as a demand read miss; only the
-	// response path treats it differently, retiring it silently instead of
-	// sending a DataReadyRsp.
+	// IsPrefetch marks a self-issued speculative fetch with a synthetic
+	// ReadMeta (never received at topParser, so nothing to respond to). It
+	// runs the same pipeline as a demand miss but retires silently.
 	IsPrefetch bool `json:"is_prefetch"`
 
 	// Removed marks this transaction slot as logically deleted.
@@ -384,12 +376,9 @@ func (s *State) PrintProject4Report() {
 	fmt.Printf(" ACCURACY (%%)             : %.2f %%\n", accuracy)
 	fmt.Println("==================================================")
 
-	// This runs on every Drain/Pause completion, not just once at end-of-run,
-	// so the counters are reset here to report per-interval deltas rather
-	// than an ever-growing total. PrefetchedBlocks and PollutionEvictedAddrs
-	// are not reset: they track which resident/evicted blocks are still-
-	// unclaimed prefetches, and must persist across prints for future
-	// hit/pollution/caused-miss accounting to work.
+	// Runs on every Drain/Pause, so counters reset here for per-interval
+	// deltas. PrefetchedBlocks/PollutionEvictedAddrs are not reset — they
+	// must persist across prints for future accounting.
 	s.PrefetchRequests = 0
 	s.PrefetchHits = 0
 	s.TotalMisses = 0

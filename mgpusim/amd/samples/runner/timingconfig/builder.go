@@ -115,11 +115,8 @@ func (b Builder) WithPrefetch(
 	return b
 }
 
-// WithL2CacheSize overrides the total L2 cache size (in bytes, summed across
-// all memory banks) from the platform default. Forwarded to whichever
-// platform-specific GPU builder (r9nano or mi300x) is active; both already
-// expose a WithL2CacheSize(uint64) Builder method used internally to size
-// each memory bank's L2 slice.
+// WithL2CacheSize overrides the total L2 cache size (bytes, summed across
+// all memory banks) from the platform default.
 func (b Builder) WithL2CacheSize(size uint64) Builder {
 	b.l2CacheSize = size
 	return b

@@ -15,10 +15,8 @@ type pipelineMW struct {
 
 	storage *mem.Storage
 
-	// prefetcher is nil when Spec.EnablePrefetch is false. It is
-	// algorithm-learned state (stream tables, confidence counters), not
-	// simulation state: it is not part of the serializable State struct
-	// and is rebuilt fresh by the Builder rather than checkpointed.
+	// prefetcher is nil when Spec.EnablePrefetch is false. Not part of
+	// State — it's rebuilt fresh by the Builder, not checkpointed.
 	prefetcher prefetch.Prefetcher
 
 	topParser   *topParser
