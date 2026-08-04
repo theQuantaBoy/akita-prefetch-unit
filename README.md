@@ -28,8 +28,6 @@ Both algorithms suppress candidates that cross virtual page boundaries and respe
 
 ## Repository Structure
 
-The repository ships only the files added or modified relative to the upstream simulators. All changes are also available under `diff/`.
-
 ```
 akita/mem/cache/prefetch/       # New standalone package (prefetcher interface, Stride, Next-Line)
 │   prefetcher.go               # Prefetcher interface + StreamID type
