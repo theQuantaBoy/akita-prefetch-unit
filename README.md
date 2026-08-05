@@ -4,7 +4,7 @@ A configurable L2 cache prefetch unit for the [Akita](https://github.com/sarchla
 
 > **Computer Architecture — Project 4**  
 > Sharif University of Technology, Spring 2025  
-> Group 9: Mohsen Salah, Sorouna Kia, Amirhossein Mahboodi  
+> Group 9: Mohsen Salah, Sourena Kia, Amirhossein Mahboodi  
 
 ---
 
